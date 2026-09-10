@@ -8,6 +8,8 @@ from pydantic import BaseModel
 from database import SessionLocal
 from models import EngineSensorData, FaultEvent
 
+from ML.fault_detector import detect_fault
+
 
 app = FastAPI(
     title="UAV Digital Twin Backend",
@@ -275,7 +277,6 @@ def home():
 # ============================================================
 # SENSOR DATA API
 # ============================================================
-
 @app.post("/sensor-data")
 def receive_sensor_data(data: SensorDataRequest):
 
@@ -300,10 +301,9 @@ def receive_sensor_data(data: SensorDataRequest):
 
     try:
 
-        # ----------------------------------------------------
-        # STEP 1
-        # Raw sensor reading PostgreSQL mein save karo
-        # ----------------------------------------------------
+        # ====================================================
+        # STEP 1: Sensor data database mein save karo
+        # ====================================================
 
         sensor_data = EngineSensorData(
 
@@ -327,20 +327,37 @@ def receive_sensor_data(data: SensorDataRequest):
         db.refresh(sensor_data)
 
 
-        # ----------------------------------------------------
-        # STEP 2
-        # Sensor values ko fault detection function mein bhejo
-        # ----------------------------------------------------
+        # ====================================================
+        # STEP 2: Pydantic data ko dictionary mein convert karo
+        # ====================================================
 
-        detected_fault = detect_fault(data)
+        sensor_values = {
+
+            "rpm": data.rpm,
+            "cht": data.cht,
+            "egt": data.egt,
+            "oil_pressure": data.oil_pressure,
+            "oil_temperature": data.oil_temperature,
+            "fuel_flow": data.fuel_flow,
+            "vibration": data.vibration,
+            "battery_voltage": data.battery_voltage,
+            "alternator_current": data.alternator_current,
+            "injection_timing": data.injection_timing
+        }
 
 
-        # ----------------------------------------------------
-        # STEP 3
-        # Agar fault mila, toh fault_events table mein save karo
-        # ----------------------------------------------------
+        # ====================================================
+        # STEP 3: ML fault detector
+        # ====================================================
 
-        if detected_fault is not None:
+        detected_fault = detect_fault(sensor_values)
+
+
+        # ====================================================
+        # STEP 4: Agar anomaly detect hui
+        # ====================================================
+
+        if detected_fault["status"] == "ANOMALY":
 
             fault_event = FaultEvent(
 
@@ -352,9 +369,13 @@ def receive_sensor_data(data: SensorDataRequest):
 
                 detected_at=data.timestamp,
 
-                confidence=detected_fault["confidence"],
+                confidence=abs(
+                    detected_fault["anomaly_score"]
+                ),
 
-                description=detected_fault["description"]
+                description=(
+                    f"ML detected {detected_fault['fault_type']}"
+                )
             )
 
             db.add(fault_event)
@@ -363,7 +384,8 @@ def receive_sensor_data(data: SensorDataRequest):
 
 
             return {
-                "message": "Sensor data stored and fault detected",
+
+                "message": "Sensor data stored and anomaly detected",
 
                 "sensor_data_id": sensor_data.id,
 
@@ -373,10 +395,9 @@ def receive_sensor_data(data: SensorDataRequest):
             }
 
 
-        # ----------------------------------------------------
-        # STEP 4
-        # Agar fault nahi mila
-        # ----------------------------------------------------
+        # ====================================================
+        # STEP 5: Normal reading
+        # ====================================================
 
         return {
 
@@ -384,7 +405,7 @@ def receive_sensor_data(data: SensorDataRequest):
 
             "sensor_data_id": sensor_data.id,
 
-            "fault": None
+            "fault": detected_fault
         }
 
 
@@ -924,3 +945,15 @@ def get_engine_health():
     finally:
 
         db.close()
+
+@app.post("/sensor-data-ml")
+def receive_sensor_data_ml(data: SensorDataRequest):
+
+    result = detect_fault(data)
+
+    return {
+        "engine_id": data.engine_id,
+        "timestamp": data.timestamp,
+        "fault_detection": result
+    }
+
