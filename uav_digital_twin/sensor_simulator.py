@@ -11,7 +11,7 @@ import requests
 # ============================================================
 
 # Sensor telemetry FastAPI ke through PostgreSQL mein jayegi
-API_URL = "http://127.0.0.1:8000/sensor-data"
+API_URL = API_URL = "http://127.0.0.1:8000/sensor-data-ml"
 
 
 # ============================================================
@@ -246,6 +246,7 @@ while True:
             json=data
         )
 
+        print("ML RESPONSE:", response.json())
 
         # Terminal mein condition + important readings show karo
         print(
