@@ -1,7 +1,8 @@
 from datetime import datetime
 from typing import Optional
 
-from fastapi import FastAPI
+import anyio
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 
 from database import SessionLocal
@@ -13,6 +14,59 @@ app = FastAPI(
     description="Backend API for MALE UAV Aero Piston Engine Digital Twin",
     version="1.0.0"
 )
+
+
+# ============================================================
+# LIVE TELEMETRY WEBSOCKET
+# ============================================================
+# Dashboard (React) is WebSocket se connect hota hai:
+#
+# ws://127.0.0.1:8000/ws/telemetry
+#
+# Jaise hi simulator POST /sensor-data bhejta hai,
+# wahi reading turant saare connected dashboards ko
+# broadcast ho jaati hai. Dashboard ko poll nahi karna padta.
+# ============================================================
+
+class TelemetryBroadcaster:
+
+    def __init__(self):
+        self.connections = set()
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.connections.add(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        self.connections.discard(websocket)
+
+    async def broadcast(self, message: dict):
+        for websocket in list(self.connections):
+            try:
+                await websocket.send_json(message)
+            except Exception:
+                # Band ho chuka dashboard list se hata do
+                self.disconnect(websocket)
+
+
+broadcaster = TelemetryBroadcaster()
+
+
+@app.websocket("/ws/telemetry")
+async def telemetry_stream(websocket: WebSocket):
+
+    await broadcaster.connect(websocket)
+
+    try:
+        # Connection open rakho jab tak dashboard khud disconnect na kare
+        while True:
+            await websocket.receive_text()
+
+    except WebSocketDisconnect:
+        pass
+
+    finally:
+        broadcaster.disconnect(websocket)
 
 
 # ============================================================
@@ -224,6 +278,23 @@ def home():
 
 @app.post("/sensor-data")
 def receive_sensor_data(data: SensorDataRequest):
+
+    # --------------------------------------------------------
+    # STEP 0
+    # Reading ko live dashboards par turant broadcast karo.
+    # DB write se pehle, taaki DB slow ho tab bhi dashboard
+    # live chalta rahe.
+    #
+    # Note: ye function sync (def) hai aur threadpool mein
+    # chalta hai, isliye async broadcast ko
+    # anyio.from_thread.run se call kar rahe hain.
+    # --------------------------------------------------------
+
+    live_message = data.model_dump(mode="json")
+    live_message["type"] = "reading"
+    live_message["fault"] = detect_fault(data)
+
+    anyio.from_thread.run(broadcaster.broadcast, live_message)
 
     db = SessionLocal()
 

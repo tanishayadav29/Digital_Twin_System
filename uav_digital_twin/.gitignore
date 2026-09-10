@@ -1,1 +1,4 @@
 .env
+.venv/
+.winenv/
+__pycache__/
