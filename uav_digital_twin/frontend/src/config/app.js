@@ -17,8 +17,9 @@ export const TREND_RANGES = [
   { id: '15m', label: '15 min', ms: 15 * 60_000 },
 ]
 
-// Flip to true once the Isolation Forest publishes messages like
-//   {"type": "anomaly", "timestamp": "...", "fault_type": "OVERHEATING",
-//    "severity": "HIGH", "confidence": 0.93, "description": "...", "sensors": ["cht"]}
-// on /ws/telemetry. Until then alerts only come from the manual test trigger.
-export const ALERTS_FROM_BACKEND = false
+// The backend runs every reading through the Isolation Forest detector
+// (ML/fault_detector.py) and, when it finds one, publishes on /ws/telemetry:
+//   {"type": "anomaly", "timestamp": "...", "fault_type": "OVERHEATING", "severity": "HIGH",
+//    "anomaly_score": -0.12, "model_prediction": "ANOMALY", "sensors": ["cht", "egt"]}
+// Set to false to ignore those; alerts then only come from the manual test trigger.
+export const ALERTS_FROM_BACKEND = true

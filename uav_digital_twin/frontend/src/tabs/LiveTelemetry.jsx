@@ -73,7 +73,7 @@ export function LiveTelemetry({ telemetry, stale, alerts }) {
         </section>
       </div>
 
-      <AlertPanel alerts={alerts} />
+      <AlertPanel alerts={alerts} telemetry={telemetry} />
     </div>
   )
 }

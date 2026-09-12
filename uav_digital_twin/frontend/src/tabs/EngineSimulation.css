@@ -1,0 +1,438 @@
+/* ============================================================
+   Engine simulation tab - blueprint-style cutaway
+   ============================================================ */
+.sim {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 330px;
+  gap: 18px;
+  align-items: start;
+}
+
+@media (max-width: 1100px) {
+  .sim {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.sim__stage {
+  padding: 16px 18px 10px;
+}
+
+.sim__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 18px;
+}
+
+.sim__score {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.sim__score-label {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.sim__score-value {
+  font-size: 30px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.sim__note {
+  flex: 1 1 240px;
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+
+.sim__legend {
+  display: flex;
+  gap: 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+
+.sim__legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sim__legend-item::before {
+  content: '';
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  background: var(--c);
+}
+
+.sim__legend-item--normal {
+  --c: var(--good);
+}
+
+.sim__legend-item--warning {
+  --c: var(--warning);
+}
+
+.sim__legend-item--critical {
+  --c: var(--critical);
+}
+
+.sim__svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin-top: 8px;
+}
+
+/* Faint drawing grid behind the engine */
+#sim-grid path {
+  fill: none;
+  stroke: rgba(125, 165, 225, 0.11);
+  stroke-width: 1;
+}
+
+.sim__grid {
+  pointer-events: none;
+}
+
+/* ------------------------------------------------------------
+   Parts - drawn as outlines; colour follows health (lib/health.js).
+   --line is the outline, --part the accent used for fills and text.
+   ------------------------------------------------------------ */
+.part {
+  --part: var(--good);
+  --line: rgba(203, 226, 255, 0.62);
+  cursor: pointer;
+}
+
+.part--warning {
+  --part: var(--warning);
+  --line: color-mix(in srgb, var(--warning) 78%, white);
+}
+
+.part--critical {
+  --part: var(--critical);
+  --line: color-mix(in srgb, var(--critical) 80%, white);
+}
+
+.part--nodata {
+  --part: var(--text-3);
+  --line: rgba(160, 184, 216, 0.34);
+}
+
+.part__shape {
+  fill: color-mix(in srgb, var(--part) 9%, transparent);
+  stroke: var(--line);
+  stroke-width: 1.7;
+  stroke-linejoin: round;
+  transition:
+    fill 0.5s var(--ease-out),
+    stroke 0.5s var(--ease-out);
+}
+
+.part__detail,
+.part__fin {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 1.3;
+  stroke-linecap: round;
+  opacity: 0.75;
+}
+
+.part__detail-dot {
+  fill: color-mix(in srgb, var(--part) 22%, transparent);
+  stroke: var(--line);
+  stroke-width: 1.5;
+}
+
+/* connecting rod */
+.part__rod {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 5;
+  stroke-linecap: round;
+  opacity: 0.7;
+}
+
+.part__pipe {
+  fill: none;
+  stroke: var(--line);
+  stroke-width: 6;
+  stroke-linecap: round;
+  opacity: 0.9;
+}
+
+.part__pipe--thin {
+  stroke-width: 4;
+}
+
+.part__pipe--fat {
+  stroke-width: 11;
+}
+
+/* ------------------------------------------------------------
+   Labels: name + percentage on a plate, with a leader line
+   ------------------------------------------------------------ */
+.part__plate {
+  fill: color-mix(in srgb, var(--bg) 86%, transparent);
+  stroke: color-mix(in srgb, var(--part) 34%, transparent);
+  stroke-width: 1;
+}
+
+.part__leader {
+  fill: none;
+  stroke: color-mix(in srgb, var(--part) 50%, transparent);
+  stroke-width: 1.2;
+  stroke-dasharray: 3 3;
+}
+
+.part__name {
+  fill: var(--text-2);
+  font-size: 12.5px;
+}
+
+.part__pct {
+  fill: var(--part);
+  font-size: 16px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Hover tints the outline; selection is shown with a glow, so colour always means health */
+.part:hover .part__shape,
+.part:focus-visible .part__shape {
+  stroke: var(--part);
+}
+
+.part:hover .part__name,
+.part:focus-visible .part__name {
+  fill: var(--text-1);
+}
+
+.part.is-selected .part__shape {
+  stroke-width: 2.3;
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--part) 45%, transparent));
+}
+
+.part.is-selected .part__pipe,
+.part.is-selected .part__rod {
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--part) 40%, transparent));
+}
+
+.part.is-selected .part__plate {
+  stroke: color-mix(in srgb, var(--part) 70%, transparent);
+}
+
+.part:focus {
+  outline: none;
+}
+
+/* ------------------------------------------------------------
+   Motion: fuel and oil flow, spinning propeller, alert pulse
+   ------------------------------------------------------------ */
+.part__pipe--flow {
+  stroke-dasharray: 9 11;
+  animation: sim-flow 1.4s linear infinite;
+}
+
+@keyframes sim-flow {
+  to {
+    stroke-dashoffset: -20;
+  }
+}
+
+.sim__blades {
+  transform-origin: 170px 300px;
+  animation: sim-spin 1.8s linear infinite;
+}
+
+@keyframes sim-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.part--critical .part__shape {
+  animation: sim-pulse 1.7s ease-in-out infinite;
+}
+
+@keyframes sim-pulse {
+  50% {
+    fill: color-mix(in srgb, var(--part) 19%, transparent);
+  }
+}
+
+.sim--stale .part__pipe--flow,
+.sim--stale .sim__blades,
+.sim--stale .part__shape {
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .part__pipe--flow,
+  .sim__blades,
+  .part--critical .part__shape {
+    animation: none;
+  }
+}
+
+/* ------------------------------------------------------------
+   Detail panel
+   ------------------------------------------------------------ */
+.sim__detail {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px 18px;
+}
+
+.sim__detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.sim__detail-title {
+  margin: 0 0 6px;
+  font-size: 16px;
+}
+
+.sim__detail-pct {
+  font-size: 26px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.sim__detail-pct--normal {
+  color: var(--good);
+}
+
+.sim__detail-pct--warning {
+  color: var(--warning);
+}
+
+.sim__detail-pct--critical {
+  color: var(--critical);
+}
+
+.sim__detail-pct--nodata {
+  color: var(--text-3);
+}
+
+.sim__blurb {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+.sim__sub {
+  margin: 4px 0 0;
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.sim__sensors,
+.sim__faults {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.sim__sensor {
+  --c: var(--good);
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 10px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  font-size: 12.5px;
+}
+
+.sim__sensor--warning {
+  --c: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 40%, transparent);
+}
+
+.sim__sensor--critical {
+  --c: var(--critical);
+  border-color: color-mix(in srgb, var(--critical) 45%, transparent);
+}
+
+.sim__sensor-name {
+  color: var(--text-2);
+}
+
+.sim__sensor-value {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--c);
+}
+
+.sim__sensor-unit {
+  margin-left: 3px;
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--text-3);
+}
+
+.sim__sensor-dev {
+  grid-column: 1 / -1;
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.sim__fault {
+  --c: var(--serious);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  border: 1px solid color-mix(in srgb, var(--c) 40%, transparent);
+  background: color-mix(in srgb, var(--c) 12%, var(--surface-2));
+  font-size: 12px;
+}
+
+.sim__fault--warning {
+  --c: var(--warning);
+}
+
+.sim__fault--critical {
+  --c: var(--critical);
+}
+
+.sim__fault span {
+  color: var(--text-2);
+}
+
+.sim__flagged,
+.sim__empty {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.sim__worst {
+  display: flex;
+}

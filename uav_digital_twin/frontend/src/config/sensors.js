@@ -19,8 +19,9 @@ export const SENSORS = [
     max: 3500,
     decimals: 0,
     primary: true,
-    // frontend only (backend's misfire rule uses rpm < 2600)
-    limits: { critLow: 2400, warnLow: 2600, warnHigh: 3000, critHigh: 3200 },
+    // frontend only (backend's misfire rule uses rpm < 2600). Wide enough for every
+    // flight phase in sensor_simulator.py: descent 2450 ... takeoff 3100.
+    limits: { critLow: 2200, warnLow: 2350, warnHigh: 3200, critHigh: 3350 },
   },
   {
     key: 'cht',

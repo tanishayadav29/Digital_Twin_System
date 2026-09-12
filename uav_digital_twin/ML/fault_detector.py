@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import joblib
 import numpy as np
 
@@ -5,8 +7,74 @@ import numpy as np
 # ============================================================
 # LOAD MODEL
 # ============================================================
+# Path is file ki location se banta hai, taaki model load ho
+# chahe uvicorn uav_digital_twin/ se chale ya test script ML/ se.
+# ============================================================
 
-model = joblib.load("ML/models/isolation_forest.pkl")
+MODEL_PATH = Path(__file__).resolve().parent / "models" / "isolation_forest.pkl"
+
+model = joblib.load(MODEL_PATH)
+
+
+# ============================================================
+# NORMAL ENGINE PROFILE
+# ============================================================
+# (mean, std) har sensor ka - train_model.py wale hi numbers,
+# usi order mein jis order mein model train hua tha.
+#
+# Iska use:
+# - missing sensor value ko normal value se fill karna
+# - anomaly mein kaunse sensors normal se sabse zyada door
+#   hain, wo dashboard ko batana
+# ============================================================
+
+NORMAL_PROFILE = {
+    "rpm": (2800, 50),
+    "cht": (185, 2),
+    "egt": (720, 10),
+    "oil_pressure": (45, 2),
+    "oil_temperature": (90, 2),
+    "fuel_flow": (12, 0.5),
+    "vibration": (0.30, 0.05),
+    "battery_voltage": (24.5, 0.3),
+    "alternator_current": (8, 0.5),
+    "injection_timing": (12, 0.5)
+}
+
+FEATURES = list(NORMAL_PROFILE)
+
+# Normal mean se itne std door = deviating sensor
+DEVIATION_THRESHOLD = 3.0
+
+
+# ============================================================
+# DEVIATING SENSORS
+# ============================================================
+# Isolation Forest sirf batata hai ki reading unusual hai,
+# kaunsa sensor - ye nahi. Isliye har sensor ka z-score
+# nikaal kar deviate hone wale sensors return karte hain
+# (sabse zyada deviate wala pehle).
+# ============================================================
+
+def deviating_sensors(values, missing):
+
+    z_scores = {
+        key: abs(values[key] - mean) / std
+        for key, (mean, std) in NORMAL_PROFILE.items()
+    }
+
+    deviating = sorted(
+        (key for key in FEATURES if z_scores[key] >= DEVIATION_THRESHOLD),
+        key=z_scores.get,
+        reverse=True
+    )
+
+    # Koi single sensor bahut door nahi, lekin combination
+    # unusual hai: sabse zyada deviate wala sensor dikhao
+    if not deviating and not missing:
+        deviating = [max(FEATURES, key=z_scores.get)]
+
+    return missing + deviating
 
 
 # ============================================================
@@ -15,34 +83,41 @@ model = joblib.load("ML/models/isolation_forest.pkl")
 
 def detect_fault(sensor_data):
 
-    rpm = sensor_data["rpm"]
-    cht = sensor_data["cht"]
-    egt = sensor_data["egt"]
-    oil_pressure = sensor_data["oil_pressure"]
-    oil_temperature = sensor_data["oil_temperature"]
-    fuel_flow = sensor_data["fuel_flow"]
-    vibration = sensor_data["vibration"]
-    battery_voltage = sensor_data["battery_voltage"]
-    alternator_current = sensor_data["alternator_current"]
-    injection_timing = sensor_data["injection_timing"]
+    # --------------------------------------------------------
+    # SENSOR VALUES
+    # --------------------------------------------------------
+    # Sensor values Optional hain. Missing value ko normal
+    # value se fill karo taaki model chal sake; missing sensor
+    # khud SENSOR_DRIFT_FAILURE maana jayega.
+    # --------------------------------------------------------
+
+    missing = [
+        key for key in FEATURES
+        if sensor_data.get(key) is None
+    ]
+
+    values = {
+        key: NORMAL_PROFILE[key][0] if key in missing else float(sensor_data[key])
+        for key in FEATURES
+    }
+
+    rpm = values["rpm"]
+    cht = values["cht"]
+    egt = values["egt"]
+    oil_pressure = values["oil_pressure"]
+    oil_temperature = values["oil_temperature"]
+    fuel_flow = values["fuel_flow"]
+    vibration = values["vibration"]
+    battery_voltage = values["battery_voltage"]
+    alternator_current = values["alternator_current"]
+    injection_timing = values["injection_timing"]
 
 
     # --------------------------------------------------------
     # ML INPUT
     # --------------------------------------------------------
 
-    reading = np.array([[
-        rpm,
-        cht,
-        egt,
-        oil_pressure,
-        oil_temperature,
-        fuel_flow,
-        vibration,
-        battery_voltage,
-        alternator_current,
-        injection_timing
-    ]])
+    reading = np.array([[values[key] for key in FEATURES]])
 
 
     # --------------------------------------------------------
@@ -52,6 +127,9 @@ def detect_fault(sensor_data):
     prediction = model.predict(reading)[0]
 
     anomaly_score = model.decision_function(reading)[0]
+
+    # Sirf model kya bol raha hai (rules se alag)
+    model_prediction = "NORMAL" if prediction == 1 else "ANOMALY"
 
 
     # ========================================================
@@ -151,7 +229,8 @@ def detect_fault(sensor_data):
     # --------------------------------------------------------
 
     elif (
-        rpm < 1500
+        missing
+        or rpm < 1500
         or rpm > 4000
         or cht < 100
         or cht > 300
@@ -180,18 +259,14 @@ def detect_fault(sensor_data):
                 "status": "NORMAL",
                 "fault_type": None,
                 "severity": "NONE",
-                "anomaly_score": float(anomaly_score)
+                "anomaly_score": float(anomaly_score),
+                "model_prediction": model_prediction,
+                "sensors": []
             }
 
         # ML anomaly bol raha hai but known fault nahi mila
-        else:
-
-            return {
-                "status": "ANOMALY",
-                "fault_type": "UNKNOWN_ANOMALY",
-                "severity": "MEDIUM",
-                "anomaly_score": float(anomaly_score)
-            }
+        fault_type = "UNKNOWN_ANOMALY"
+        severity = "MEDIUM"
 
 
     # ========================================================
@@ -202,7 +277,9 @@ def detect_fault(sensor_data):
         "status": "ANOMALY",
         "fault_type": fault_type,
         "severity": severity,
-        "anomaly_score": float(anomaly_score)
+        "anomaly_score": float(anomaly_score),
+        "model_prediction": model_prediction,
+        "sensors": deviating_sensors(values, missing)
     }
 
 

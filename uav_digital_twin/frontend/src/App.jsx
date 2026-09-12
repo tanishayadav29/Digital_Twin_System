@@ -5,16 +5,16 @@ import { ALERTS_FROM_BACKEND, STALE_AFTER_MS } from './config/app.js'
 import { useAlerts } from './hooks/useAlerts.js'
 import { useNow } from './hooks/useNow.js'
 import { useTelemetry } from './hooks/useTelemetry.js'
-import { ComingSoon } from './tabs/ComingSoon.jsx'
+import { EngineSimulation } from './tabs/EngineSimulation.jsx'
 import { EngineTrends } from './tabs/EngineTrends.jsx'
+import { MaintenanceAdvisory } from './tabs/MaintenanceAdvisory.jsx'
 import { LiveTelemetry } from './tabs/LiveTelemetry.jsx'
 
-// Tabs 3-4 are placeholders - rename them as those views get built.
 const TABS = [
   { id: 'live', label: 'Live telemetry' },
   { id: 'trends', label: 'Engine trends' },
-  { id: 'anomalies', label: 'Anomaly detection', soon: true },
-  { id: 'history', label: 'Fault history', soon: true },
+  { id: 'engine', label: 'Engine simulation' },
+  { id: 'maintenance', label: 'Maintenance advisory' },
 ]
 
 const SOURCE_KEY = 'uav-dt:source'
@@ -114,7 +114,8 @@ export default function App() {
       <main id={`panel-${tab}`} role="tabpanel" aria-labelledby={`tab-${tab}`}>
         {tab === 'live' && <LiveTelemetry telemetry={telemetry} stale={stale} alerts={alerts} />}
         {tab === 'trends' && <EngineTrends telemetry={telemetry} stale={stale} now={now} />}
-        {tab !== 'live' && tab !== 'trends' && <ComingSoon title={TABS.find((t) => t.id === tab).label} />}
+        {tab === 'engine' && <EngineSimulation telemetry={telemetry} stale={stale} alerts={alerts} />}
+        {tab === 'maintenance' && <MaintenanceAdvisory alerts={alerts} />}
       </main>
 
       <AlertToast

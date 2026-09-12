@@ -3,19 +3,28 @@
 React + Vite frontend.
 
 - **Tab 1 — Live telemetry:** live gauges for all 10 engine sensors, a 2-minute strip chart
-  under each gauge, and the anomaly alert panel (with a manual test trigger until the
-  Isolation Forest is wired in).
+  under each gauge, and the anomaly alert panel fed by the backend's Isolation Forest detector
+  (plus a manual test trigger).
 - **Tab 2 — Engine trends:** a live line chart per parameter (2 / 5 / 15 min window, hover
   one chart to read all of them at that moment, pause) and relationship charts — CHT vs RPM,
   EGT vs RPM, Vibration vs RPM, Oil pressure vs RPM and CHT vs EGT — each showing the normal
   operating envelope, the latest reading's trail and a correlation score. A readings table
   sits underneath.
-- Tabs 3–4 are placeholders.
+- **Tab 3 — Engine simulation:** a blueprint-style cutaway of the engine. Every part is labelled
+  with a health percentage worked out from its sensors, how far they sit from the value the model
+  expects, and any active fault; parts turn amber or red as they degrade, and clicking one shows the
+  readings behind it.
+- **Tab 4 — Maintenance advisory:** one advisory per fault the engine has raised — what causes it,
+  what to do while it is happening, what to inspect on the ground, and preventive tasks with
+  intervals. Built from `GET /fault-summary` (every recorded fault event) plus this session's alerts,
+  and ending with a combined preventive schedule. Advisories can be marked as actioned.
 
 ## How the data flows
 
 ```
 sensor_simulator.py ──POST /sensor-data──▶ FastAPI (main.py) ──▶ Postgres
+                                              │
+                                     ML/fault_detector.py
                                               │
                                               └─ broadcast ──▶ WS /ws/telemetry
                                                                    │
@@ -40,7 +49,8 @@ npm run dev
 ```
 
 Open http://localhost:5173 and click **Simulated** (top right). It runs a browser copy of
-`sensor_simulator.py`, with the same values and fault odds.
+`sensor_simulator.py` (`src/lib/simulator.js`) with the same engine model and fault episodes.
+There's no ML detector in this mode, so no alerts.
 
 ## Run it with the backend
 
@@ -85,6 +95,33 @@ You need Node 20.19+ (or 22.12+), Python 3 and PostgreSQL.
 Open http://localhost:5173 with **Backend** selected. The badge at the top right should read
 **Live · WebSocket stream** and the needles should move once a second.
 
+### What the simulator does
+
+`sensor_simulator.py` behaves like a running engine rather than random numbers:
+
+- **Sensors move together.** Fuel flow, EGT, CHT, oil temperature and oil pressure follow RPM,
+  and CHT / oil temperature heat up and cool down gradually.
+- **Faults develop over minutes**, one at a time: *developing* (2.5–4 min) → *active* (1–2 min)
+  → *recovering*, then a healthy gap of 3–6 min. Detector thresholds are crossed part-way
+  through, so the gauges trend before any alert fires.
+- **The terminal shows the ground truth next to the ML result**, e.g.
+  `Truth: OVERHEATING developing 59% | ML: UNKNOWN_ANOMALY`. The truth is never sent to the
+  backend.
+
+Useful options (`python sensor_simulator.py --help` for all):
+
+| Option | Effect |
+|--------|--------|
+| `--fault overheating` | Only this fault (repeat the flag for several) |
+| `--fault-after 30` | First fault after 30 s instead of 120 s |
+| `--speed 5` | Simulated time runs 5× faster — a whole episode in ~1.5 min |
+| `--no-faults` | Healthy engine only |
+| `--profile mission` | Takeoff, climb, cruise, loiter, descent. The current Isolation Forest was trained on cruise only, so it flags every non-cruise phase as `UNKNOWN_ANOMALY` |
+| `--log run.csv` | Also save readings, ground truth and ML result to CSV |
+| `--offline --duration 7200 --log normal.csv` | Generate 2 h of data instantly without the backend (e.g. for training) |
+
+For a demo: `python sensor_simulator.py --fault overheating --fault-after 20 --speed 5`.
+
 ### What the connection badge means
 
 | Badge | Meaning | Fix |
@@ -106,28 +143,43 @@ Create `frontend/.env` containing `BACKEND_URL=http://<their-ip>:8000`, then res
 | What | File |
 |------|------|
 | Gauge ranges, caution/alert limits, units | `src/config/sensors.js` |
-| Fault types in the test trigger | `src/config/faults.js` |
+| Fault type titles, descriptions, test trigger list | `src/config/faults.js` |
+| Engine parts, their sensors and faults | `src/config/engineParts.js` |
+| Maintenance advice and preventive intervals | `src/config/maintenance.js` |
 | Relationship chart pairs, titles and hints | `src/config/relationships.js` |
 | Tab names | `src/App.jsx` (`TABS`) |
 | Colours | `src/styles.css` (tokens at the top), `src/tabs/EngineTrends.css` (chart ink) |
 | Stream timings, history length, trend time ranges | `src/config/app.js` |
 
-## Wiring in the Isolation Forest later
+## How anomalies reach the dashboard
 
-1. In the backend, when a window is flagged, broadcast on the same socket:
+`POST /sensor-data` runs every reading through `ML/fault_detector.py` (Isolation Forest plus
+fault rules). When the result is an anomaly, the backend broadcasts this on the same socket,
+right after the reading itself:
 
-   ```python
-   # from sync code such as receive_sensor_data:
-   anyio.from_thread.run(broadcaster.broadcast, {
-       "type": "anomaly",
-       "timestamp": data.timestamp.isoformat(),
-       "fault_type": "OVERHEATING",        # or "ANOMALY" if the model can't tell
-       "severity": "HIGH",                  # MEDIUM | HIGH | CRITICAL
-       "confidence": 0.93,
-       "description": "CHT trending abnormally high",
-       "sensors": ["cht", "egt"],           # these gauges get a FLAGGED tag
-   })
-   # from async code: await broadcaster.broadcast({...})
-   ```
+```json
+{
+  "type": "anomaly",
+  "engine_id": "ENGINE_001",
+  "timestamp": "2026-09-11T10:00:00Z",
+  "fault_type": "OVERHEATING",
+  "severity": "HIGH",
+  "anomaly_score": -0.03,
+  "model_prediction": "ANOMALY",
+  "sensors": ["cht", "egt", "oil_temperature"]
+}
+```
 
-2. Set `ALERTS_FROM_BACKEND = true` in `src/config/app.js`.
+- `fault_type` is one of the types in `src/config/faults.js`, which supplies the title and
+  description.
+- `sensors` are the readings furthest from normal; those gauges get a FLAGGED tag.
+- `anomaly_score` is the Isolation Forest decision score (below 0 = anomalous).
+- `model_prediction` says whether the model itself flagged the reading (`ML` chip) or only a
+  fault rule matched (`Rule` chip).
+
+The backend reports a fault on every reading while it lasts. The dashboard groups repeats: the
+same fault type again within 15 s updates the open alert ("42 readings · last 10:14:03")
+instead of adding a new alert and toast. Once you acknowledge it, a repeat raises a fresh one.
+
+Alerts only arrive over the WebSocket, so the REST polling fallback and the **Simulated**
+source show none. Set `ALERTS_FROM_BACKEND = false` in `src/config/app.js` to ignore them.

@@ -4,7 +4,16 @@ import { FAULT_TYPES, SEVERITY_META, faultTitle } from '../config/faults.js'
 import { SENSOR_BY_KEY } from '../config/sensors.js'
 import { formatClock } from '../lib/format.js'
 
-export function AlertPanel({ alerts }) {
+// ML alerts only travel over the backend WebSocket, not the REST fallback
+function detectorStatus({ link, transport }) {
+  if (!ALERTS_FROM_BACKEND) return 'off'
+  if (transport === 'simulator') return 'backend source only'
+  if (link === 'open' && transport === 'websocket') return 'connected'
+  if (link === 'open') return 'paused, no live stream'
+  return link === 'connecting' ? 'connecting' : 'offline'
+}
+
+export function AlertPanel({ alerts, telemetry }) {
   const { items, trigger, acknowledge, acknowledgeAll, clear } = alerts
   const [faultType, setFaultType] = useState(FAULT_TYPES[0].type)
   const activeCount = items.filter((a) => !a.acknowledged).length
@@ -20,7 +29,7 @@ export function AlertPanel({ alerts }) {
         <div>
           <h2 className="alerts__title">Anomaly alerts</h2>
           <p className="alerts__sub">
-            ML detector · {ALERTS_FROM_BACKEND ? 'connected' : 'not connected'}
+            ML detector · {detectorStatus(telemetry)}
           </p>
         </div>
         <span className={`pill ${alarm ? 'pill--alarm' : 'pill--quiet'}`}>
@@ -64,7 +73,7 @@ export function AlertPanel({ alerts }) {
       <footer className="alerts__foot">
         <div className="alerts__foot-label">
           <span>Test trigger</span>
-          <span>Until the ML model is wired in</span>
+          <span>Local alert, skips the ML model</span>
         </div>
         <div className="row">
           <select
@@ -114,6 +123,16 @@ function AlertItem({ alert, onAcknowledge }) {
         <span className="sev">{severity.label}</span>
         <span>{faultTitle(alert.fault_type)}</span>
         {alert.confidence != null && <span>{Math.round(alert.confidence * 100)}% confidence</span>}
+        {alert.anomaly_score != null && (
+          <span title="Isolation Forest decision score: below 0 means the model sees the reading as anomalous">
+            Score {alert.anomaly_score.toFixed(3)}
+          </span>
+        )}
+        {alert.count > 1 && (
+          <span>
+            {alert.count} readings · last {formatClock(alert.lastTimestamp)}
+          </span>
+        )}
       </div>
       <div className="alert__foot">
         <div className="chips">
@@ -123,6 +142,16 @@ function AlertItem({ alert, onAcknowledge }) {
             </span>
           ))}
           {alert.source === 'manual' && <span className="chip chip--muted">Test</span>}
+          {alert.model_prediction === 'ANOMALY' && (
+            <span className="chip chip--muted" title="The Isolation Forest model flagged this reading">
+              ML
+            </span>
+          )}
+          {alert.model_prediction === 'NORMAL' && (
+            <span className="chip chip--muted" title="Matched a fault rule; the Isolation Forest scored it normal">
+              Rule
+            </span>
+          )}
         </div>
         {alert.acknowledged ? (
           <span className="alert__acked">Acknowledged</span>

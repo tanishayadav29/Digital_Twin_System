@@ -1,41 +1,49 @@
-// Fault types the manual test trigger can raise. The `type` values match the
-// fault_type strings the backend already uses (main.py -> detect_fault), so the
-// panel will render real detector output the same way.
+// Fault types the ML detector can report. The `type` values match the fault_type
+// strings ML/fault_detector.py returns. Backend alerts carry their own severity
+// and sensors; `title` and `description` always come from here. The manual test
+// trigger raises these too.
 export const FAULT_TYPES = [
   {
     type: 'OVERHEATING',
     title: 'Overheating',
     severity: 'HIGH',
     sensors: ['cht', 'egt', 'oil_temperature'],
-    description: 'CHT trending abnormally high',
+    description: 'Engine temperatures above safe limits',
+  },
+  {
+    type: 'LUBRICATION_ISSUE',
+    title: 'Lubrication issue',
+    severity: 'CRITICAL',
+    sensors: ['oil_pressure'],
+    description: 'Oil pressure below safe range',
   },
   {
     type: 'MISFIRE',
     title: 'Misfire',
     severity: 'HIGH',
-    sensors: ['vibration', 'rpm'],
-    description: 'Sharp vibration spikes with RPM drop',
+    sensors: ['rpm', 'vibration', 'egt'],
+    description: 'RPM drop with vibration spike and low EGT',
   },
   {
-    type: 'LOW_OIL_PRESSURE',
-    title: 'Low oil pressure',
-    severity: 'CRITICAL',
-    sensors: ['oil_pressure'],
-    description: 'Oil pressure falling below safe range',
-  },
-  {
-    type: 'HIGH_VIBRATION',
-    title: 'High vibration',
-    severity: 'MEDIUM',
+    type: 'ABNORMAL_VIBRATION',
+    title: 'Abnormal vibration',
+    severity: 'HIGH',
     sensors: ['vibration'],
-    description: 'Sustained abnormal vibration level',
+    description: 'Engine vibration abnormally high',
   },
   {
-    type: 'FUEL_ANOMALY',
-    title: 'Fuel flow anomaly',
-    severity: 'MEDIUM',
-    sensors: ['fuel_flow'],
-    description: 'Fuel flow deviating from normal pattern',
+    type: 'INJECTOR_ABNORMALITY',
+    title: 'Injector abnormality',
+    severity: 'HIGH',
+    sensors: ['fuel_flow', 'injection_timing'],
+    description: 'High fuel flow with injection timing off nominal',
+  },
+  {
+    type: 'COMBUSTION_INSTABILITY',
+    title: 'Combustion instability',
+    severity: 'HIGH',
+    sensors: ['vibration', 'egt', 'rpm'],
+    description: 'Vibration with unstable EGT at reduced RPM',
   },
   {
     type: 'ELECTRICAL_FAULT',
@@ -43,6 +51,20 @@ export const FAULT_TYPES = [
     severity: 'MEDIUM',
     sensors: ['battery_voltage', 'alternator_current'],
     description: 'Charging system output degraded',
+  },
+  {
+    type: 'SENSOR_DRIFT_FAILURE',
+    title: 'Sensor drift / failure',
+    severity: 'MEDIUM',
+    sensors: [],
+    description: 'Sensor reading missing or outside its physical range',
+  },
+  {
+    type: 'UNKNOWN_ANOMALY',
+    title: 'Unknown anomaly',
+    severity: 'MEDIUM',
+    sensors: [],
+    description: 'Isolation Forest flagged an unusual sensor pattern',
   },
 ]
 

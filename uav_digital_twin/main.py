@@ -4,11 +4,12 @@ from typing import Optional
 import anyio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
+from sqlalchemy import func
 
 from database import SessionLocal
 from models import EngineSensorData, FaultEvent
 
-from ML.fault_detector import detect_fault
+from ML.fault_detector_v2 import detect_fault
 
 
 app = FastAPI(
@@ -99,170 +100,6 @@ class SensorDataRequest(BaseModel):
 
 
 # ============================================================
-# FAULT DETECTION FUNCTION
-# ============================================================
-# IMPORTANT:
-#
-# Simulator humein "fault" naam ka label nahi bhej raha.
-# Backend sirf sensor readings dekh raha hai.
-#
-# Example:
-# CHT > 210 + EGT > 800
-#        ↓
-# Backend infer karega
-#        ↓
-# OVERHEATING
-#
-# Ye abhi rule-based fault detection hai.
-# Baad mein isi jagah ML anomaly detection model add
-# kiya ja sakta hai.
-# ============================================================
-
-def detect_fault(data):
-
-    # --------------------------------------------------------
-    # 1. OVERHEATING
-    # --------------------------------------------------------
-    # High CHT, EGT ya oil temperature overheating indicate
-    # kar sakta hai.
-    # --------------------------------------------------------
-
-    if (
-        (data.cht is not None and data.cht > 210)
-        or
-        (data.egt is not None and data.egt > 800)
-        or
-        (data.oil_temperature is not None and data.oil_temperature > 105)
-    ):
-
-        return {
-            "fault_type": "OVERHEATING",
-            "severity": "HIGH",
-            "confidence": 0.95,
-            "description": "Abnormally high engine temperature detected."
-        }
-
-
-    # --------------------------------------------------------
-    # 2. LOW OIL PRESSURE
-    # --------------------------------------------------------
-    # Oil pressure bahut low hone par lubrication problem
-    # ho sakti hai.
-    # --------------------------------------------------------
-
-    if (
-        data.oil_pressure is not None
-        and data.oil_pressure < 30
-    ):
-
-        return {
-            "fault_type": "LOW_OIL_PRESSURE",
-            "severity": "CRITICAL",
-            "confidence": 0.95,
-            "description": "Engine oil pressure is below the safe threshold."
-        }
-
-
-    # --------------------------------------------------------
-    # 3. MISFIRE
-    # --------------------------------------------------------
-    # Misfire ke case mein:
-    #
-    # RPM decrease
-    # +
-    # vibration increase
-    # +
-    # EGT decrease
-    #
-    # ho sakta hai.
-    # --------------------------------------------------------
-
-    if (
-        data.vibration is not None
-        and data.vibration > 0.75
-        and data.rpm is not None
-        and data.rpm < 2600
-    ):
-
-        return {
-            "fault_type": "MISFIRE",
-            "severity": "HIGH",
-            "confidence": 0.92,
-            "description": "Abnormal vibration with reduced RPM indicates possible engine misfire."
-        }
-
-
-    # --------------------------------------------------------
-    # 4. HIGH VIBRATION
-    # --------------------------------------------------------
-    # Agar vibration bahut high hai but misfire ke conditions
-    # satisfy nahi ho rahe, toh generic high vibration fault.
-    # --------------------------------------------------------
-
-    if (
-        data.vibration is not None
-        and data.vibration > 0.8
-    ):
-
-        return {
-            "fault_type": "HIGH_VIBRATION",
-            "severity": "MEDIUM",
-            "confidence": 0.90,
-            "description": "Abnormally high engine vibration detected."
-        }
-
-
-    # --------------------------------------------------------
-    # 5. FUEL ANOMALY
-    # --------------------------------------------------------
-    # Normal fuel flow approx 11.5 - 12.5 hai.
-    #
-    # Simulator fault mein fuel flow approx 15.5 - 17.5
-    # ho sakta hai.
-    # --------------------------------------------------------
-
-    if (
-        data.fuel_flow is not None
-        and data.fuel_flow > 15
-    ):
-
-        return {
-            "fault_type": "FUEL_ANOMALY",
-            "severity": "MEDIUM",
-            "confidence": 0.88,
-            "description": "Fuel flow is significantly above the expected operating range."
-        }
-
-
-    # --------------------------------------------------------
-    # 6. ELECTRICAL FAULT
-    # --------------------------------------------------------
-    # Low battery voltage ya low alternator current electrical
-    # system problem indicate kar sakta hai.
-    # --------------------------------------------------------
-
-    if (
-        (data.battery_voltage is not None and data.battery_voltage < 22.5)
-        or
-        (data.alternator_current is not None and data.alternator_current < 5)
-    ):
-
-        return {
-            "fault_type": "ELECTRICAL_FAULT",
-            "severity": "MEDIUM",
-            "confidence": 0.90,
-            "description": "Abnormal battery voltage or alternator current detected."
-        }
-
-
-    # --------------------------------------------------------
-    # Agar koi fault detect nahi hua
-    # --------------------------------------------------------
-
-    return None
-
-
-# ============================================================
 # HOME ROUTE
 # ============================================================
 
@@ -281,10 +118,21 @@ def home():
 def receive_sensor_data(data: SensorDataRequest):
 
     # --------------------------------------------------------
-    # STEP 0
-    # Reading ko live dashboards par turant broadcast karo.
-    # DB write se pehle, taaki DB slow ho tab bhi dashboard
-    # live chalta rahe.
+    # STEP 0: ML fault detector
+    # --------------------------------------------------------
+    # Isolation Forest + fault rules (ML/fault_detector.py).
+    # Yahi result DB aur live dashboard dono ke liye use hota hai.
+    # --------------------------------------------------------
+
+    detected_fault = detect_fault(data.model_dump())
+
+
+    # --------------------------------------------------------
+    # STEP 1: Live dashboards par broadcast
+    # --------------------------------------------------------
+    # Reading (aur anomaly mili toh alert bhi) turant saare
+    # dashboards ko bhejo. DB write se pehle, taaki DB slow ho
+    # tab bhi dashboard live chalta rahe.
     #
     # Note: ye function sync (def) hai aur threadpool mein
     # chalta hai, isliye async broadcast ko
@@ -293,16 +141,32 @@ def receive_sensor_data(data: SensorDataRequest):
 
     live_message = data.model_dump(mode="json")
     live_message["type"] = "reading"
-    live_message["fault"] = detect_fault(data)
+    live_message["fault"] = detected_fault
 
     anyio.from_thread.run(broadcaster.broadcast, live_message)
+
+    if detected_fault["status"] == "ANOMALY":
+
+        # Dashboard ka alert panel isi message se alert banata hai
+        anomaly_message = {
+            "type": "anomaly",
+            "engine_id": data.engine_id,
+            "timestamp": live_message["timestamp"],
+            "fault_type": detected_fault["fault_type"],
+            "severity": detected_fault["severity"],
+            "anomaly_score": detected_fault["anomaly_score"],
+            "model_prediction": detected_fault["model_prediction"],
+            "sensors": detected_fault["sensors"]
+        }
+
+        anyio.from_thread.run(broadcaster.broadcast, anomaly_message)
 
     db = SessionLocal()
 
     try:
 
         # ====================================================
-        # STEP 1: Sensor data database mein save karo
+        # STEP 2: Sensor data database mein save karo
         # ====================================================
 
         sensor_data = EngineSensorData(
@@ -328,33 +192,7 @@ def receive_sensor_data(data: SensorDataRequest):
 
 
         # ====================================================
-        # STEP 2: Pydantic data ko dictionary mein convert karo
-        # ====================================================
-
-        sensor_values = {
-
-            "rpm": data.rpm,
-            "cht": data.cht,
-            "egt": data.egt,
-            "oil_pressure": data.oil_pressure,
-            "oil_temperature": data.oil_temperature,
-            "fuel_flow": data.fuel_flow,
-            "vibration": data.vibration,
-            "battery_voltage": data.battery_voltage,
-            "alternator_current": data.alternator_current,
-            "injection_timing": data.injection_timing
-        }
-
-
-        # ====================================================
-        # STEP 3: ML fault detector
-        # ====================================================
-
-        detected_fault = detect_fault(sensor_values)
-
-
-        # ====================================================
-        # STEP 4: Agar anomaly detect hui
+        # STEP 3: Agar anomaly detect hui
         # ====================================================
 
         if detected_fault["status"] == "ANOMALY":
@@ -396,7 +234,7 @@ def receive_sensor_data(data: SensorDataRequest):
 
 
         # ====================================================
-        # STEP 5: Normal reading
+        # STEP 4: Normal reading
         # ====================================================
 
         return {
@@ -475,6 +313,88 @@ def get_fault_events():
 
         return {
             "message": "Failed to retrieve fault events",
+            "error": str(e)
+        }
+
+    finally:
+
+        db.close()
+
+# ============================================================
+# GET FAULT SUMMARY
+# ============================================================
+# GET /fault-summary
+#
+# Har fault type ka summary: kitni baar aaya, pehli aur aakhri
+# baar kab, aur kaun kaun si severity ke saath.
+#
+# Dashboard ka "Maintenance advisory" tab isse decide karta hai
+# ki kaun sa advisory sabse upar dikhana hai (baar-baar aane
+# wala fault = zyada zaroori).
+# ============================================================
+
+@app.get("/fault-summary")
+def get_fault_summary(engine_id: Optional[str] = None):
+
+    db = SessionLocal()
+
+    try:
+
+        # ----------------------------------------------------
+        # Count + pehla / aakhri occurrence, fault type ke hisaab se
+        # ----------------------------------------------------
+
+        counts = db.query(
+            FaultEvent.fault_type,
+            func.count(FaultEvent.id),
+            func.min(FaultEvent.detected_at),
+            func.max(FaultEvent.detected_at)
+        )
+
+        if engine_id:
+            counts = counts.filter(FaultEvent.engine_id == engine_id)
+
+        rows = counts.group_by(FaultEvent.fault_type).all()
+
+
+        # ----------------------------------------------------
+        # Ek fault type alag-alag severity ke saath aa sakta hai
+        # ----------------------------------------------------
+
+        pairs = db.query(FaultEvent.fault_type, FaultEvent.severity).distinct()
+
+        if engine_id:
+            pairs = pairs.filter(FaultEvent.engine_id == engine_id)
+
+        severities = {}
+
+        for fault_type, severity in pairs.all():
+            severities.setdefault(fault_type, []).append(severity)
+
+
+        faults = [
+            {
+                "fault_type": fault_type,
+                "count": count,
+                "first_seen": first_seen,
+                "last_seen": last_seen,
+                "severities": severities.get(fault_type, [])
+            }
+            for fault_type, count, first_seen, last_seen in rows
+        ]
+
+        faults.sort(key=lambda fault: fault["count"], reverse=True)
+
+        return {
+            "total_faults": sum(fault["count"] for fault in faults),
+            "fault_types": len(faults),
+            "faults": faults
+        }
+
+    except Exception as e:
+
+        return {
+            "message": "Failed to summarise fault events",
             "error": str(e)
         }
 
@@ -949,7 +869,7 @@ def get_engine_health():
 @app.post("/sensor-data-ml")
 def receive_sensor_data_ml(data: SensorDataRequest):
 
-    result = detect_fault(data)
+    result = detect_fault(data.model_dump())
 
     return {
         "engine_id": data.engine_id,

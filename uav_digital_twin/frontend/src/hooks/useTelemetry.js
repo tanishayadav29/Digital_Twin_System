@@ -9,7 +9,7 @@ import {
   WS_RETRY_MS,
 } from '../config/app.js'
 import { SENSORS } from '../config/sensors.js'
-import { simulateReading } from '../lib/simulator.js'
+import { createSimulator } from '../lib/simulator.js'
 
 const WS_URL =
   import.meta.env.VITE_WS_URL ||
@@ -36,7 +36,8 @@ function normalize(msg, receivedAt) {
   const src = msg.sensors ?? msg
   const values = {}
   for (const { key } of SENSORS) values[key] = typeof src[key] === 'number' ? src[key] : null
-  return { engineId: msg.engine_id ?? null, timestamp, time, receivedAt, values }
+  // fault = the detector's result for this reading (live stream only; database rows have none)
+  return { engineId: msg.engine_id ?? null, timestamp, time, receivedAt, values, fault: msg.fault ?? null }
 }
 
 // Keeps the buffer sorted by time with one entry per timestamp. Live readings
@@ -94,8 +95,9 @@ export function useTelemetry({ source, onAnomaly }) {
     if (source === 'simulator') {
       setLink('open')
       setTransport('simulator')
-      push(simulateReading())
-      const timer = setInterval(() => push(simulateReading()), 1000)
+      const nextReading = createSimulator()
+      push(nextReading())
+      const timer = setInterval(() => push(nextReading()), 1000)
       return () => clearInterval(timer)
     }
 
