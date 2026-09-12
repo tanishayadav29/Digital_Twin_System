@@ -1,3 +1,7 @@
 python3 -m uvicorn main:app --reload #terminal1
 
 python3 sensor_simulator.py #terminal2
+
+cd uav_digital_twin #terminal3
+source venv/bin/activate
+npm run dev
