@@ -121,40 +121,40 @@ export function EngineSimulation({ telemetry, stale, alerts }) {
 
           {/* ---------- cooling air: duct into the cylinder fins ---------- */}
           <Part id="cooling" {...common}>
-            <path className="part__shape" d="M250 150L352 168V208L250 226Z" />
+            <path className="part__shape" d="M250 134L352 150V194L250 214Z" />
             <path
               className="part__detail"
-              d="M272 172H330M322 168l9 4-9 4M272 188H330M322 184l9 4-9 4M272 204H330M322 200l9 4-9 4"
+              d="M278 154H330M322 150l9 4-9 4M278 170H330M322 166l9 4-9 4M278 188H330M322 184l9 4-9 4"
             />
             {FINS.map((y) => (
               <path key={y} className="part__fin" d={`M352 ${y}H376`} />
             ))}
-            <Label x="166" y="186" id="cooling" health={health} leader="M220 186H250" />
+            <Label x="160" y="174" id="cooling" health={health} leader="M212 174H250" />
           </Part>
 
           {/* ---------- fuel: tank -> pump -> rail -> injectors ---------- */}
           <Part id="fuel_tank" {...common}>
-            <rect className="part__shape" x="40" y="40" width="160" height="66" rx="14" />
-            <path className="part__detail" d="M58 92h124M104 40v-8h22v8" />
-            <Label x="120" y="66" id="fuel_tank" health={health} />
+            <rect className="part__shape" x="34" y="44" width="160" height="66" rx="14" />
+            <path className="part__detail" d="M58 102h124M104 40v-8h22v8" />
+            <Label x="116" y="70" id="fuel_tank" health={health} />
           </Part>
 
           <Part id="fuel_pump" {...common}>
-            <path className="part__pipe part__pipe--flow" d="M200 73H220" />
-            <circle className="part__shape" cx="240" cy="73" r="20" />
-            <path className="part__detail" d="M240 59v28M226 73h28" />
-            <Label x="250" y="26" id="fuel_pump" health={health} leader="M250 42V53" />
+            <path className="part__pipe part__pipe--flow" d="M200 70H220" />
+            <circle className="part__shape" cx="238" cy="73" r="20" />
+            <path className="part__detail" d="M238 59v28M224 73h28" />
+            <Label x="244" y="22" id="fuel_pump" health={health} leader="M250 42V53" />
           </Part>
 
           <Part id="injectors" {...common}>
-            <path className="part__pipe part__pipe--flow" d="M260 73H700" />
+            <path className="part__pipe part__pipe--flow" d="M266 68H700" />
             {CYLINDERS.map((c) => (
               <g key={c.x}>
                 <path className="part__pipe part__pipe--thin" d={`M${c.x - 14} 73V82`} />
-                <rect className="part__shape" x={c.x - 20} y="82" width="12" height="20" rx="3" />
+                <rect className="part__shape" x={c.x - 20} y="88" width="12" height="20" rx="3" />
               </g>
             ))}
-            <Label x="716" y="56" id="injectors" health={health} anchor="start" leader="M712 60L700 73" />
+            <Label x="730" y="50" id="injectors" health={health} anchor="start" leader="M714 58L700 73" />
           </Part>
 
           {/* ---------- spark plugs ---------- */}
@@ -165,12 +165,12 @@ export function EngineSimulation({ telemetry, stale, alerts }) {
                 <path className="part__detail" d={`M${c.x + 14} 104v12`} />
               </g>
             ))}
-            <Label x="716" y="112" id="combustion" health={health} anchor="start" leader="M712 112H672" />
+            <Label x="734" y="112" id="combustion" health={health} anchor="start" leader="M724 112H666" />
           </Part>
 
           {/* ---------- block, heads, pistons ---------- */}
           <Part id="cylinders" {...common}>
-            <path className="part__shape" d="M376 104H704V250H376Z" />
+            <path className="part__shape" d="M376 80H704V250H376Z" />
             {CYLINDERS.map((c) => (
               <g key={c.x}>
                 <rect className="part__shape" x={c.x - 30} y="100" width="60" height="28" rx="4" />
@@ -181,15 +181,15 @@ export function EngineSimulation({ telemetry, stale, alerts }) {
                 <path className="part__shape" d={`M${c.x - 20} ${c.piston + 14}h40v18h-40z`} />
               </g>
             ))}
-            <Label x="716" y="214" id="cylinders" health={health} anchor="start" leader="M712 214H684" />
+            <Label x="734" y="214" id="cylinders" health={health} anchor="start" leader="M744 214H680" />
           </Part>
 
           {/* ---------- exhaust ---------- */}
           <Part id="exhaust" {...common}>
-            <path className="part__pipe part__pipe--fat" d="M704 176H812" />
-            <rect className="part__shape" x="812" y="156" width="128" height="40" rx="10" />
-            <path className="part__detail" d="M836 162v28M860 162v28M884 162v28M908 162v28" />
-            <Label x="876" y="230" id="exhaust" health={health} leader="M876 214V198" />
+            <path className="part__pipe part__pipe--fat" d="M713 176H815" />
+            <rect className="part__shape" x="824" y="156" width="128" height="40" rx="10" />
+            <path className="part__detail" d="M852 162v28M876 162v28M900 162v28M924 162v28" />
+            <Label x="888" y="230" id="exhaust" health={health} leader="M888 214V198" />
           </Part>
 
           {/* ---------- crankshaft: webs, journals, con-rods ---------- */}
@@ -214,10 +214,10 @@ export function EngineSimulation({ telemetry, stale, alerts }) {
           </Part>
 
           <Part id="mounts" {...common}>
-            <path className="part__shape" d="M358 268h18v44h-18zM704 268h18v44h-18z" />
+            <path className="part__shape" d="M358 278h18v44h-18zM704 278h18v48h-18z" />
             <circle className="part__detail-dot" cx="367" cy="290" r="4" />
             <circle className="part__detail-dot" cx="713" cy="290" r="4" />
-            <Label x="300" y="240" id="mounts" health={health} leader="M352 250L360 270" />
+            <Label x="290" y="238" id="mounts" health={health} leader="M348 238L360 274" />
           </Part>
 
           {/* ---------- propeller and reduction drive ---------- */}
@@ -242,42 +242,42 @@ export function EngineSimulation({ telemetry, stale, alerts }) {
             <circle className="part__detail-dot" cx="278" cy="300" r="15" />
             <circle className="part__detail-dot" cx="308" cy="300" r="9" />
             <path className="part__pipe part__pipe--thin" d="M330 300H340" />
-            <Label x="250" y="392" id="gearbox" health={health} leader="M250 376V336" />
+            <Label x="274" y="424" id="gearbox" health={health} leader="M284 406V334" />
           </Part>
 
           {/* ---------- oil: sump -> pump -> cooler ---------- */}
           <Part id="oil_sump" {...common}>
-            <path className="part__shape" d="M420 338H660L640 388H440Z" />
-            <path className="part__detail" d="M452 376h176" />
-            <Label x="540" y="356" id="oil_sump" health={health} />
+            <path className="part__shape" d="M420 340H660L640 394H440Z" />
+            <path className="part__detail" d="M454 388h176" />
+            <Label x="540" y="360" id="oil_sump" health={health} />
           </Part>
 
           <Part id="oil_pump" {...common}>
-            <path className="part__pipe part__pipe--flow" d="M640 380H700l20 14" />
-            <circle className="part__shape" cx="740" cy="410" r="21" />
-            <path className="part__detail" d="M740 394v32M724 410h32" />
-            <Label x="740" y="466" id="oil_pump" health={health} leader="M740 450V432" />
+            <path className="part__pipe part__pipe--flow" d="M650 380H700l20 14" />
+            <circle className="part__shape" cx="740" cy="414" r="21" />
+            <path className="part__detail" d="M740 398v32M724 414h32" />
+            <Label x="740" y="474" id="oil_pump" health={health} leader="M740 458V432" />
           </Part>
 
           <Part id="oil_cooler" {...common}>
-            <path className="part__pipe part__pipe--flow" d="M761 410H800" />
-            <rect className="part__shape" x="800" y="382" width="150" height="56" rx="10" />
-            <path className="part__detail" d="M824 390v40M850 390v40M876 390v40M902 390v40M928 390v40" />
-            <Label x="875" y="404" id="oil_cooler" health={health} />
+            <path className="part__pipe part__pipe--flow" d="M766 414H800" />
+            <rect className="part__shape" x="800" y="388" width="150" height="56" rx="10" />
+            <path className="part__detail" d="M816 396v40M824 396v40M876 396v40M926 396v40M934 396v40" />
+            <Label x="875" y="412" id="oil_cooler" health={health} />
           </Part>
 
           {/* ---------- electrical ---------- */}
           <Part id="alternator" {...common}>
-            <path className="part__pipe part__pipe--thin" d="M706 284L790 270M706 316L790 322" />
-            <circle className="part__shape" cx="790" cy="296" r="30" />
-            <circle className="part__detail-dot" cx="790" cy="296" r="12" />
-            <Label x="790" y="352" id="alternator" health={health} leader="M790 336V326" />
+            <path className="part__pipe part__pipe--thin" d="M700 282L790 270M706 316L790 322" />
+            <circle className="part__shape" cx="804" cy="296" r="30" />
+            <circle className="part__detail-dot" cx="804" cy="296" r="12" />
+            <Label x="804" y="352" id="alternator" health={health} leader="M804 336V326" />
           </Part>
 
           <Part id="battery" {...common}>
-            <rect className="part__shape" x="860" y="254" width="120" height="56" rx="8" />
-            <path className="part__detail" d="M882 254v-8h12v8M946 254v-8h12v8" />
-            <Label x="920" y="278" id="battery" health={health} />
+            <rect className="part__shape" x="866" y="280" width="120" height="56" rx="8" />
+            <path className="part__detail" d="M882 280v-8h12v8M946 280v-8h12v8" />
+            <Label x="924" y="304" id="battery" health={health} />
           </Part>
         </svg>
       </section>
