@@ -17,6 +17,21 @@ export const TREND_RANGES = [
   { id: '15m', label: '15 min', ms: 15 * 60_000 },
 ]
 
+// ---------------------------------------------------------------- replay
+// History replay pulls a window out of the database through
+// GET /sensor-history?start=&end= and plays it back (hooks/useReplay.js).
+export const REPLAY_WINDOWS = [
+  { id: '2m', label: '2 min', ms: 2 * 60_000 },
+  { id: '5m', label: '5 min', ms: 5 * 60_000 },
+  { id: '15m', label: '15 min', ms: 15 * 60_000 },
+  { id: '30m', label: '30 min', ms: 30 * 60_000 },
+  { id: '60m', label: '1 hour', ms: 60 * 60_000 },
+]
+
+export const REPLAY_SPEEDS = [1, 4, 16, 60] // playback multipliers
+export const REPLAY_MAX_READINGS = 5000 // backend's cap for a windowed query
+export const REPLAY_UI_HZ = 12 // how often the playhead is pushed into React state
+
 // The backend runs every reading through the Isolation Forest detector
 // (ML/fault_detector.py) and, when it finds one, publishes on /ws/telemetry:
 //   {"type": "anomaly", "timestamp": "...", "fault_type": "OVERHEATING", "severity": "HIGH",

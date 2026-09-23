@@ -3,9 +3,18 @@ export function ConnectionBadge({ source, link, transport, stale, lastReceivedAt
   let label
   let detail
 
-  if (source === 'simulator') {
+  if (source === 'replay') {
+    tone = link === 'connecting' ? 'warning' : 'info'
+    label = link === 'connecting' ? 'Loading' : 'Replay'
+    detail =
+      link === 'connecting'
+        ? 'Reading the recording…'
+        : transport === 'replay'
+          ? 'Playing recorded history'
+          : 'Pick a date and time'
+  } else if (source === 'simulator') {
     tone = 'info'
-    label = 'Simulated'
+    label = 'Demo'
     detail = 'In-browser generator'
   } else if (link === 'connecting') {
     tone = 'warning'

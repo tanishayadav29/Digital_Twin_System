@@ -4,9 +4,11 @@ import { ConnectionBadge } from './components/ConnectionBadge.jsx'
 import { ALERTS_FROM_BACKEND, STALE_AFTER_MS } from './config/app.js'
 import { useAlerts } from './hooks/useAlerts.js'
 import { useNow } from './hooks/useNow.js'
+import { useReplay } from './hooks/useReplay.js'
 import { useTelemetry } from './hooks/useTelemetry.js'
 import { EngineSimulation } from './tabs/EngineSimulation.jsx'
 import { EngineTrends } from './tabs/EngineTrends.jsx'
+import { FlightReplay } from './tabs/FlightReplay.jsx'
 import { MaintenanceAdvisory } from './tabs/MaintenanceAdvisory.jsx'
 import { LiveTelemetry } from './tabs/LiveTelemetry.jsx'
 
@@ -14,17 +16,20 @@ const TABS = [
   { id: 'live', label: 'Live telemetry' },
   { id: 'trends', label: 'Engine trends' },
   { id: 'engine', label: 'Engine simulation' },
+  { id: 'flight', label: 'Flight replay' },
   { id: 'maintenance', label: 'Maintenance advisory' },
 ]
 
 const SOURCE_KEY = 'uav-dt:source'
+const SOURCES = ['backend', 'replay', 'simulator']
 
-// ?source=simulator|backend in the URL wins, then the last choice, then backend
+// ?source=backend|replay|simulator in the URL wins, then the last choice, then backend
 function initialSource() {
   const fromUrl = new URLSearchParams(window.location.search).get('source')
-  if (fromUrl === 'simulator' || fromUrl === 'backend') return fromUrl
+  if (SOURCES.includes(fromUrl)) return fromUrl
   try {
-    return localStorage.getItem(SOURCE_KEY) === 'simulator' ? 'simulator' : 'backend'
+    const saved = localStorage.getItem(SOURCE_KEY)
+    return SOURCES.includes(saved) ? saved : 'backend'
   } catch {
     return 'backend'
   }
@@ -34,14 +39,27 @@ export default function App() {
   const [tab, setTab] = useState('live')
   const [source, setSource] = useState(initialSource)
   const alerts = useAlerts()
-  const telemetry = useTelemetry({ source, onAnomaly: ALERTS_FROM_BACKEND ? alerts.push : undefined })
+  const isReplay = source === 'replay'
+
+  // Only one of these is ever running: useTelemetry idles while replay is on,
+  // so the dashboard never has a live socket fighting a historical playhead.
+  const live = useTelemetry({
+    source: isReplay ? 'idle' : source,
+    onAnomaly: ALERTS_FROM_BACKEND ? alerts.push : undefined,
+  })
+  const replayed = useReplay({ active: isReplay })
+  const telemetry = isReplay ? replayed : live
   const now = useNow(500)
 
   const { latest } = telemetry
-  const stale = !latest || now - latest.receivedAt > STALE_AFTER_MS
+  // Replay has no live clock to fall behind, so there "stale" just means the
+  // playhead is sitting somewhere with no reading.
+  const stale = isReplay ? !latest : !latest || now - latest.receivedAt > STALE_AFTER_MS
 
   const changeSource = (next) => {
     setSource(next)
+    // Landing straight on the flight view is what people want from Replay.
+    if (next === 'replay') setTab('flight')
     try {
       localStorage.setItem(SOURCE_KEY, next)
     } catch {
@@ -84,10 +102,18 @@ export default function App() {
           />
           <div className="segmented" role="group" aria-label="Data source">
             <button type="button" aria-pressed={source === 'backend'} onClick={() => changeSource('backend')}>
-              Backend
+              Live
             </button>
-            <button type="button" aria-pressed={source === 'simulator'} onClick={() => changeSource('simulator')}>
-              Simulated
+            <button type="button" aria-pressed={source === 'replay'} onClick={() => changeSource('replay')}>
+              Replay
+            </button>
+            <button
+              type="button"
+              aria-pressed={source === 'simulator'}
+              onClick={() => changeSource('simulator')}
+              title="In-browser generator - works with no backend or database"
+            >
+              Demo
             </button>
           </div>
         </div>
@@ -115,6 +141,9 @@ export default function App() {
         {tab === 'live' && <LiveTelemetry telemetry={telemetry} stale={stale} alerts={alerts} />}
         {tab === 'trends' && <EngineTrends telemetry={telemetry} stale={stale} now={now} />}
         {tab === 'engine' && <EngineSimulation telemetry={telemetry} stale={stale} alerts={alerts} />}
+        {tab === 'flight' && (
+          <FlightReplay telemetry={telemetry} stale={stale} source={source} replay={replayed.replay} />
+        )}
         {tab === 'maintenance' && <MaintenanceAdvisory alerts={alerts} />}
       </main>
 

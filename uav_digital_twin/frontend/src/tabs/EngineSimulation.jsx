@@ -1,23 +1,65 @@
-import { useMemo, useState } from 'react'
+import { Suspense, lazy, useMemo, useState } from 'react'
 import { StatusLight } from '../components/StatusLight.jsx'
 import { PART_BY_ID } from '../config/engineParts.js'
+import { ENGINE_3D_SOURCES, SPEC } from '../config/engine3d.js'
 import { SEVERITY_META, faultTitle } from '../config/faults.js'
 import { formatValue } from '../lib/format.js'
 import { healthFor, overallHealth, worstPart } from '../lib/health.js'
 import './EngineSimulation.css'
 
-// Inline four, drawn as a cutaway: bore centre, piston crown height and the
-// crank pin it hangs off, so every piston sits at a believable point in its stroke.
+// three.js is only paid for if someone opens the 3D view.
+const Engine3D = lazy(() => import('../components/engine3d/Engine3D.jsx'))
+
+// Rotax 912 iS drawn in plan view - looking down on the engine with the
+// propeller at the left. It is the only view that shows all four cylinders of
+// an opposed engine at once: 1 and 3 on the upper bank, 2 and 4 on the lower,
+// staggered along the crank by the width of a con-rod the way they really are.
+//
+// `out` says where the piston sits in its stroke. A boxer's opposed pair reaches
+// top dead centre together, and the front pair runs 180 degrees from the rear -
+// the same phasing the 3D model animates (see config/engine3d.js).
+const CY = 320 // crankshaft centreline
+const THROW = 20 // crank throw on screen: half of the 61 mm stroke
+
 const CYLINDERS = [
-  { x: 434, piston: 150, pin: [0, -18] },
-  { x: 506, piston: 198, pin: [15, 11] },
-  { x: 578, piston: 166, pin: [-15, -10] },
-  { x: 650, piston: 212, pin: [0, 18] },
+  { n: 1, x: 322, up: true, out: true },
+  { n: 2, x: 336, up: false, out: true },
+  { n: 3, x: 516, up: true, out: false },
+  { n: 4, x: 530, up: false, out: false },
 ]
 
-const CRANK_Y = 300
-const JOURNALS = [398, 470, 542, 614, 686]
-const FINS = Array.from({ length: 11 }, (_, i) => 136 + i * 10)
+const JOURNALS = [266, 372, 462, 570, 606]
+const FIN_OFFSETS = [52, 60, 70, 80, 90, 100]
+
+// Distances measured outward from the centreline, so one set of numbers draws
+// both banks and the engine cannot drift out of symmetry.
+const OUT = {
+  caseEdge: 48,
+  barrel: 108,
+  head: 164,
+  cover: 182,
+  plug: 198,
+  lead: 208,
+  exhaustRun: 220,
+  pistonOut: [88, 102],
+  pistonIn: [52, 66],
+}
+
+// Half-widths either side of a cylinder's centre.
+const HALF = { barrel: 32, fin: 42, head: 40, cover: 28, piston: 26 }
+
+// Mirrors one bank onto the other: `at` turns a distance out from the
+// centreline into a y on screen, `band` turns two of them into a rect.
+function bank(up) {
+  const dir = up ? -1 : 1
+  const at = (offset) => CY + dir * offset
+  const band = (a, b) => {
+    const y0 = at(a)
+    const y1 = at(b)
+    return { y: Math.min(y0, y1), height: Math.abs(y1 - y0) }
+  }
+  return { dir, at, band }
+}
 
 const pct = (health) => (health == null ? '—' : `${Math.round(health * 100)}%`)
 
@@ -71,9 +113,264 @@ function Label({ x, y, id, health, anchor = 'middle', leader }) {
   )
 }
 
+// The blueprint cutaway, in plan view. Schematic, not to scale - the 3D view is
+// the one built to the engine's published dimensions.
+function Schematic2D({ health, selected, onSelect }) {
+  const common = { health, selected, onSelect }
+
+  return (
+    <svg className="sim__svg" viewBox="0 0 1040 660" role="img" aria-label="Rotax 912 plan view with per-part health">
+      <defs>
+        <pattern id="sim-grid" width="26" height="26" patternUnits="userSpaceOnUse">
+          <path d="M26 0H0V26" />
+        </pattern>
+      </defs>
+      <rect className="sim__grid" x="0" y="0" width="1040" height="660" fill="url(#sim-grid)" />
+
+      {/* ---------- propeller, seen edge on from above ---------- */}
+      <Part id="propeller" {...common}>
+        <path className="part__shape" d="M106 302C100 256 106 198 112 152Q118 140 124 152C130 198 136 256 130 302Z" />
+        <path className="part__shape" d="M106 338C100 384 106 442 112 488Q118 500 124 488C130 442 136 384 130 338Z" />
+        <circle className="part__shape" cx="118" cy="320" r="19" />
+        <circle className="part__detail-dot" cx="118" cy="320" r="8" />
+        <path className="part__pipe part__pipe--thin" d="M137 320H146" />
+        <Label x="118" y="566" id="propeller" health={health} leader="M118 550V496" />
+      </Part>
+
+      {/* ---------- 2.43:1 reduction drive ---------- */}
+      <Part id="gearbox" {...common}>
+        <rect className="part__shape" x="146" y="272" width="70" height="96" rx="10" />
+        <circle className="part__detail-dot" cx="178" cy="298" r="22" />
+        <circle className="part__detail-dot" cx="200" cy="342" r="12" />
+        <path className="part__pipe part__pipe--thin" d="M216 320H248" />
+        <Label x="150" y="432" id="gearbox" health={health} leader="M162 416L182 372" />
+      </Part>
+
+      {/* ---------- crankcase, crank, webs and rods ---------- */}
+      <Part id="crankcase" {...common}>
+        <rect className="part__shape" x="248" y="272" width="372" height="96" rx="6" />
+        <path className="part__detail" d={`M248 ${CY}H620`} />
+        <rect className="part__shape" x="228" y="296" width="20" height="48" rx="4" />
+        {JOURNALS.map((x) => (
+          <circle key={x} className="part__shape" cx={x} cy={CY} r="11" />
+        ))}
+        {[329, 523].map((x) => (
+          <circle key={x} className="part__shape" cx={x} cy={CY} r="24" />
+        ))}
+        {CYLINDERS.map((c) => {
+          const { dir, at } = bank(c.up)
+          // The pin sits on the cylinder's own side when that piston is on its
+          // way out, and opposite it when the piston is on its way in.
+          const pinY = CY + (c.out ? dir : -dir) * THROW
+          return (
+            <g key={c.n}>
+              <path className="part__rod" d={`M${c.x} ${pinY}L${c.x} ${at(c.out ? 95 : 59)}`} />
+              <circle className="part__detail-dot" cx={c.x} cy={pinY} r="7" />
+            </g>
+          )
+        })}
+        <Label x="196" y="244" id="crankcase" health={health} leader="M212 252L252 286" />
+      </Part>
+
+      {/* ---------- four opposed cylinders: barrels, fins, heads, pistons ---------- */}
+      <Part id="cylinders" {...common}>
+        {CYLINDERS.map((c) => {
+          const { at, band } = bank(c.up)
+          const barrel = band(OUT.caseEdge, OUT.barrel)
+          const head = band(OUT.barrel, OUT.head)
+          const cover = band(OUT.head, OUT.cover)
+          const piston = band(...(c.out ? OUT.pistonOut : OUT.pistonIn))
+
+          return (
+            <g key={c.n}>
+              <rect
+                className="part__shape"
+                x={c.x - HALF.barrel}
+                y={barrel.y}
+                width={HALF.barrel * 2}
+                height={barrel.height}
+              />
+              {/* Ram-air fins on the barrel. The 912 air-cools these and
+                  liquid-cools only the head above them. */}
+              {FIN_OFFSETS.map((o) => (
+                <path key={o} className="part__fin" d={`M${c.x - HALF.fin} ${at(o)}H${c.x + HALF.fin}`} />
+              ))}
+              <rect
+                className="part__shape"
+                x={c.x - HALF.head}
+                y={head.y}
+                width={HALF.head * 2}
+                height={head.height}
+                rx="5"
+              />
+              <rect
+                className="part__shape"
+                x={c.x - HALF.cover}
+                y={cover.y}
+                width={HALF.cover * 2}
+                height={cover.height}
+                rx="3"
+              />
+              <rect
+                className="part__shape"
+                x={c.x - HALF.piston}
+                y={piston.y}
+                width={HALF.piston * 2}
+                height={piston.height}
+                rx="2"
+              />
+              <text className="part__num" x={c.x} y={at(132)} textAnchor="middle">
+                {c.n}
+              </text>
+            </g>
+          )
+        })}
+        <Label x="604" y="166" id="cylinders" health={health} leader="M592 180L558 192" />
+      </Part>
+
+      {/* ---------- dual ignition: two plugs in every head ---------- */}
+      <Part id="combustion" {...common}>
+        {CYLINDERS.map((c) => {
+          const { at, band } = bank(c.up)
+          const plug = band(OUT.cover, OUT.plug)
+          return (
+            <g key={c.n}>
+              {[-20, 8].map((dx) => (
+                <g key={dx}>
+                  <rect className="part__shape" x={c.x + dx} y={plug.y} width="12" height={plug.height} rx="3" />
+                  <path
+                    className="part__detail"
+                    d={`M${c.x + dx + 6} ${at(OUT.plug)}L${c.x + dx + 6} ${at(OUT.lead)}`}
+                  />
+                </g>
+              ))}
+            </g>
+          )
+        })}
+        <Label x="246" y="136" id="combustion" health={health} anchor="end" leader="M256 136H296" />
+      </Part>
+
+      {/* ---------- airbox, runners and injectors (the iS is fuel injected) ---------- */}
+      <Part id="injectors" {...common}>
+        <rect className="part__shape" x="392" y="292" width="54" height="56" rx="8" />
+        {CYLINDERS.map((c) => {
+          const { at, band } = bank(c.up)
+          const from = c.x < 419 ? 392 : 446
+          const body = band(OUT.barrel - 16, OUT.barrel + 4)
+          return (
+            <g key={c.n}>
+              <path
+                className="part__pipe part__pipe--thin"
+                d={`M${from} ${CY + (c.up ? -14 : 14)}Q${(from + c.x) / 2} ${at(40)} ${c.x} ${at(OUT.barrel - 4)}`}
+              />
+              <rect className="part__shape" x={c.x - 7} y={body.y} width="14" height={body.height} rx="3" />
+            </g>
+          )
+        })}
+        <path className="part__pipe part__pipe--flow" d="M255 70H452Q466 70 466 84V276Q466 292 452 296H446" />
+        <Label x="412" y="240" id="injectors" health={health} leader="M412 254V292" />
+      </Part>
+
+      {/* ---------- fuel ---------- */}
+      <Part id="fuel_tank" {...common}>
+        <rect className="part__shape" x="30" y="34" width="166" height="74" rx="14" />
+        <path className="part__detail" d="M54 98h118M100 30v-8h26v8" />
+        <Label x="113" y="62" id="fuel_tank" health={health} />
+      </Part>
+
+      <Part id="fuel_pump" {...common}>
+        <path className="part__pipe part__pipe--flow" d="M196 71H217" />
+        <circle className="part__shape" cx="236" cy="71" r="19" />
+        <path className="part__detail" d="M236 58v26M223 71h26" />
+        <Label x="268" y="26" id="fuel_pump" health={health} anchor="start" leader="M270 40L252 56" />
+      </Part>
+
+      {/* ---------- exhaust: four headers into a collector and muffler ---------- */}
+      <Part id="exhaust" {...common}>
+        {CYLINDERS.map((c) => {
+          const { at } = bank(c.up)
+          return (
+            <path
+              key={c.n}
+              className="part__pipe part__pipe--fat"
+              d={`M${c.x} ${at(OUT.plug)}V${at(OUT.exhaustRun)}`}
+            />
+          )
+        })}
+        <path className="part__pipe part__pipe--fat" d="M322 100H688Q718 100 720 152V296" />
+        <path className="part__pipe part__pipe--fat" d="M336 540H688Q718 540 720 488V344" />
+        <rect className="part__shape" x="712" y="292" width="160" height="56" rx="14" />
+        <path className="part__detail" d="M744 300v40M776 300v40M808 300v40M840 300v40" />
+        <path className="part__pipe part__pipe--thin" d="M872 320H946" />
+        <Label x="810" y="252" id="exhaust" health={health} leader="M810 266V292" />
+      </Part>
+
+      {/* ---------- cooling: radiator for the heads, ram air for the barrels ---------- */}
+      <Part id="cooling" {...common}>
+        <rect className="part__shape" x="300" y="566" width="172" height="80" rx="12" />
+        <path className="part__detail" d="M324 574v64M348 574v64M372 574v64M396 574v64M420 574v64M444 574v64" />
+        <path className="part__pipe part__pipe--thin" d="M330 566Q312 520 300 480" />
+        <path className="part__pipe part__pipe--thin" d="M296 452Q250 430 232 370V270Q250 208 292 188" />
+        <circle className="part__shape" cx="262" cy="232" r="14" />
+        <Label x="386" y="600" id="cooling" health={health} />
+      </Part>
+
+      {/* ---------- engine mounts at the four corners of the case ---------- */}
+      <Part id="mounts" {...common}>
+        {[266, 590].map((x) => (
+          <g key={x}>
+            <rect className="part__shape" x={x - 13} y="258" width="26" height="14" rx="3" />
+            <rect className="part__shape" x={x - 13} y="368" width="26" height="14" rx="3" />
+            <circle className="part__detail-dot" cx={x} cy="265" r="4" />
+            <circle className="part__detail-dot" cx={x} cy="375" r="4" />
+          </g>
+        ))}
+        <Label x="206" y="500" id="mounts" health={health} leader="M206 484L264 382" />
+      </Part>
+
+      {/* ---------- oil: dry sump, so a separate tank rather than a wet pan ---------- */}
+      <Part id="oil_sump" {...common}>
+        <rect className="part__shape" x="740" y="140" width="160" height="76" rx="16" />
+        <path className="part__detail" d="M760 206h120M806 136v-8h22v8" />
+        <Label x="820" y="172" id="oil_sump" health={health} />
+      </Part>
+
+      <Part id="oil_pump" {...common}>
+        <path className="part__pipe part__pipe--flow" d="M744 214Q706 300 684 366" />
+        <circle className="part__shape" cx="660" cy="410" r="20" />
+        <path className="part__detail" d="M660 395v30M645 410h30" />
+        <path className="part__pipe part__pipe--flow" d="M680 416Q716 430 740 444" />
+        <Label x="632" y="478" id="oil_pump" health={health} leader="M636 462L654 432" />
+      </Part>
+
+      <Part id="oil_cooler" {...common}>
+        <rect className="part__shape" x="740" y="425" width="160" height="80" rx="12" />
+        <path className="part__detail" d="M764 433v64M788 433v64M812 433v64M836 433v64M860 433v64M884 433v64" />
+        <Label x="820" y="458" id="oil_cooler" health={health} />
+      </Part>
+
+      {/* ---------- electrical ---------- */}
+      <Part id="alternator" {...common}>
+        <path className="part__pipe part__pipe--thin" d="M620 306h10M620 334h10" />
+        <circle className="part__shape" cx="660" cy="320" r="32" />
+        <circle className="part__detail-dot" cx="660" cy="320" r="13" />
+        <path className="part__detail" d="M686 300Q714 196 764 132H898Q928 132 940 120" />
+        <Label x="628" y="228" id="alternator" health={health} leader="M634 242L652 290" />
+      </Part>
+
+      <Part id="battery" {...common}>
+        <rect className="part__shape" x="906" y="40" width="124" height="78" rx="10" />
+        <path className="part__detail" d="M926 40v-8h14v8M996 40v-8h14v8" />
+        <Label x="968" y="72" id="battery" health={health} />
+      </Part>
+    </svg>
+  )
+}
+
 export function EngineSimulation({ telemetry, stale, alerts }) {
   const { latest } = telemetry
   const [selected, setSelected] = useState('cylinders')
+  const [view, setView] = useState('3d')
 
   const health = useMemo(
     () => healthFor({ latest, stale, alerts: alerts.items }),
@@ -86,7 +383,6 @@ export function EngineSimulation({ telemetry, stale, alerts }) {
   const flaggedBy = latest?.fault?.flagged_by ?? []
   const part = PART_BY_ID[selected]
   const info = health[selected] ?? { status: 'nodata', health: null, sensors: [], faults: [] }
-  const common = { health, selected, onSelect: setSelected }
 
   return (
     <div className={`sim${stale ? ' sim--stale' : ''}`}>
@@ -104,6 +400,14 @@ export function EngineSimulation({ telemetry, stale, alerts }) {
                 ? 'Part health from sensor limits and how far each sensor sits from the value the model expects.'
                 : 'Part health from sensor limits only (per-sensor deviations need detector v2).'}
           </p>
+          <div className="segmented sim__view" role="group" aria-label="Engine view">
+            <button type="button" aria-pressed={view === '2d'} onClick={() => setView('2d')}>
+              2D schematic
+            </button>
+            <button type="button" aria-pressed={view === '3d'} onClick={() => setView('3d')}>
+              3D engine
+            </button>
+          </div>
           <ul className="sim__legend">
             <li className="sim__legend-item sim__legend-item--normal">Healthy</li>
             <li className="sim__legend-item sim__legend-item--warning">Degraded</li>
@@ -111,175 +415,73 @@ export function EngineSimulation({ telemetry, stale, alerts }) {
           </ul>
         </header>
 
-        <svg className="sim__svg" viewBox="0 0 1000 510" role="img" aria-label="Engine cutaway with per-part health">
-          <defs>
-            <pattern id="sim-grid" width="26" height="26" patternUnits="userSpaceOnUse">
-              <path d="M26 0H0V26" />
-            </pattern>
-          </defs>
-          <rect className="sim__grid" x="0" y="0" width="1000" height="510" fill="url(#sim-grid)" />
-
-          {/* ---------- cooling air: duct into the cylinder fins ---------- */}
-          <Part id="cooling" {...common}>
-            <path className="part__shape" d="M250 134L352 150V194L250 214Z" />
-            <path
-              className="part__detail"
-              d="M278 154H330M322 150l9 4-9 4M278 170H330M322 166l9 4-9 4M278 188H330M322 184l9 4-9 4"
+        {view === '2d' ? (
+          <Schematic2D health={health} selected={selected} onSelect={setSelected} />
+        ) : (
+          <Suspense fallback={<div className="sim__loading">Building the engine…</div>}>
+            <Engine3D
+              health={health}
+              selected={selected}
+              onSelect={setSelected}
+              telemetry={latest}
+              stale={stale}
             />
-            {FINS.map((y) => (
-              <path key={y} className="part__fin" d={`M352 ${y}H376`} />
+          </Suspense>
+        )}
+
+        <details className="sim__ref">
+          <summary>
+            Model reference — Rotax {SPEC.variant}
+            <span>
+              {SPEC.boreMm} × {SPEC.strokeMm} mm · {SPEC.displacementCc} cm³ · {SPEC.gearboxRatio}:1
+            </span>
+          </summary>
+          <dl className="sim__ref-specs">
+            <div>
+              <dt>Layout</dt>
+              <dd>{SPEC.layout}</dd>
+            </div>
+            <div>
+              <dt>Cooling</dt>
+              <dd>{SPEC.cooling}</dd>
+            </div>
+            <div>
+              <dt>Lubrication</dt>
+              <dd>{SPEC.lubrication}</dd>
+            </div>
+            <div>
+              <dt>Ignition</dt>
+              <dd>{SPEC.ignition}</dd>
+            </div>
+            <div>
+              <dt>Rated</dt>
+              <dd>
+                {SPEC.ratedKw} kW at {SPEC.ratedRpm} rpm
+              </dd>
+            </div>
+            <div>
+              <dt>Envelope</dt>
+              <dd>
+                {SPEC.lengthMm} × {SPEC.widthMm} × {SPEC.heightMm} mm, {SPEC.dryWeightKg} kg
+              </dd>
+            </div>
+          </dl>
+          <ul className="sim__ref-links">
+            {ENGINE_3D_SOURCES.map((source) => (
+              <li key={source.href}>
+                <a href={source.href} target="_blank" rel="noreferrer">
+                  {source.label}
+                </a>
+                <span>{source.gives}</span>
+              </li>
             ))}
-            <Label x="160" y="174" id="cooling" health={health} leader="M212 174H250" />
-          </Part>
-
-          {/* ---------- fuel: tank -> pump -> rail -> injectors ---------- */}
-          <Part id="fuel_tank" {...common}>
-            <rect className="part__shape" x="34" y="44" width="160" height="66" rx="14" />
-            <path className="part__detail" d="M58 102h124M104 40v-8h22v8" />
-            <Label x="116" y="70" id="fuel_tank" health={health} />
-          </Part>
-
-          <Part id="fuel_pump" {...common}>
-            <path className="part__pipe part__pipe--flow" d="M200 70H220" />
-            <circle className="part__shape" cx="238" cy="73" r="20" />
-            <path className="part__detail" d="M238 59v28M224 73h28" />
-            <Label x="244" y="22" id="fuel_pump" health={health} leader="M250 42V53" />
-          </Part>
-
-          <Part id="injectors" {...common}>
-            <path className="part__pipe part__pipe--flow" d="M266 68H700" />
-            {CYLINDERS.map((c) => (
-              <g key={c.x}>
-                <path className="part__pipe part__pipe--thin" d={`M${c.x - 14} 73V82`} />
-                <rect className="part__shape" x={c.x - 20} y="88" width="12" height="20" rx="3" />
-              </g>
-            ))}
-            <Label x="730" y="50" id="injectors" health={health} anchor="start" leader="M714 58L700 73" />
-          </Part>
-
-          {/* ---------- spark plugs ---------- */}
-          <Part id="combustion" {...common}>
-            {CYLINDERS.map((c) => (
-              <g key={c.x}>
-                <rect className="part__shape" x={c.x + 8} y="86" width="13" height="18" rx="3" />
-                <path className="part__detail" d={`M${c.x + 14} 104v12`} />
-              </g>
-            ))}
-            <Label x="734" y="112" id="combustion" health={health} anchor="start" leader="M724 112H666" />
-          </Part>
-
-          {/* ---------- block, heads, pistons ---------- */}
-          <Part id="cylinders" {...common}>
-            <path className="part__shape" d="M376 80H704V250H376Z" />
-            {CYLINDERS.map((c) => (
-              <g key={c.x}>
-                <rect className="part__shape" x={c.x - 30} y="100" width="60" height="28" rx="4" />
-                <rect className="part__shape" x={c.x - 27} y="128" width="54" height="122" />
-                <path className="part__detail" d={`M${c.x - 22} 132V246M${c.x + 22} 132V246`} />
-                <rect className="part__shape" x={c.x - 22} y={c.piston} width="44" height="14" rx="2" />
-                <path className="part__detail" d={`M${c.x - 22} ${c.piston + 18}h44M${c.x - 22} ${c.piston + 23}h44`} />
-                <path className="part__shape" d={`M${c.x - 20} ${c.piston + 14}h40v18h-40z`} />
-              </g>
-            ))}
-            <Label x="734" y="214" id="cylinders" health={health} anchor="start" leader="M744 214H680" />
-          </Part>
-
-          {/* ---------- exhaust ---------- */}
-          <Part id="exhaust" {...common}>
-            <path className="part__pipe part__pipe--fat" d="M713 176H815" />
-            <rect className="part__shape" x="824" y="156" width="128" height="40" rx="10" />
-            <path className="part__detail" d="M852 162v28M876 162v28M900 162v28M924 162v28" />
-            <Label x="888" y="230" id="exhaust" health={health} leader="M888 214V198" />
-          </Part>
-
-          {/* ---------- crankshaft: webs, journals, con-rods ---------- */}
-          <Part id="crankcase" {...common}>
-            <path className="part__shape" d="M376 250H704V338H376Z" />
-            {JOURNALS.map((x) => (
-              <circle key={x} className="part__shape" cx={x} cy={CRANK_Y} r="13" />
-            ))}
-            {CYLINDERS.map((c) => (
-              <g key={c.x}>
-                <circle className="part__shape" cx={c.x} cy={CRANK_Y} r="27" />
-                <path
-                  className="part__rod"
-                  d={`M${c.x} ${c.piston + 22}L${c.x + c.pin[0]} ${CRANK_Y + c.pin[1]}`}
-                />
-                <circle className="part__detail-dot" cx={c.x + c.pin[0]} cy={CRANK_Y + c.pin[1]} r="7" />
-              </g>
-            ))}
-            <rect className="part__shape" x="340" y="288" width="36" height="24" rx="4" />
-            <circle className="part__shape" cx="706" cy={CRANK_Y} r="16" />
-            <Label x="372" y="368" id="crankcase" health={health} leader="M372 352L392 322" />
-          </Part>
-
-          <Part id="mounts" {...common}>
-            <path className="part__shape" d="M358 278h18v44h-18zM704 278h18v48h-18z" />
-            <circle className="part__detail-dot" cx="367" cy="290" r="4" />
-            <circle className="part__detail-dot" cx="713" cy="290" r="4" />
-            <Label x="290" y="238" id="mounts" health={health} leader="M348 238L360 274" />
-          </Part>
-
-          {/* ---------- propeller and reduction drive ---------- */}
-          <Part id="propeller" {...common}>
-            <g className="sim__blades">
-              {[0, 120, 240].map((angle) => (
-                <path
-                  key={angle}
-                  className="part__shape"
-                  d="M170 300L158 234Q170 216 182 234Z"
-                  transform={`rotate(${angle} 170 300)`}
-                />
-              ))}
-            </g>
-            <circle className="part__shape" cx="170" cy="300" r="18" />
-            <path className="part__pipe part__pipe--thin" d="M188 300H250" />
-            <Label x="140" y="392" id="propeller" health={health} leader="M140 376V330" />
-          </Part>
-
-          <Part id="gearbox" {...common}>
-            <rect className="part__shape" x="250" y="268" width="80" height="64" rx="8" />
-            <circle className="part__detail-dot" cx="278" cy="300" r="15" />
-            <circle className="part__detail-dot" cx="308" cy="300" r="9" />
-            <path className="part__pipe part__pipe--thin" d="M330 300H340" />
-            <Label x="274" y="424" id="gearbox" health={health} leader="M284 406V334" />
-          </Part>
-
-          {/* ---------- oil: sump -> pump -> cooler ---------- */}
-          <Part id="oil_sump" {...common}>
-            <path className="part__shape" d="M420 340H660L640 394H440Z" />
-            <path className="part__detail" d="M454 388h176" />
-            <Label x="540" y="360" id="oil_sump" health={health} />
-          </Part>
-
-          <Part id="oil_pump" {...common}>
-            <path className="part__pipe part__pipe--flow" d="M650 380H700l20 14" />
-            <circle className="part__shape" cx="740" cy="414" r="21" />
-            <path className="part__detail" d="M740 398v32M724 414h32" />
-            <Label x="740" y="474" id="oil_pump" health={health} leader="M740 458V432" />
-          </Part>
-
-          <Part id="oil_cooler" {...common}>
-            <path className="part__pipe part__pipe--flow" d="M766 414H800" />
-            <rect className="part__shape" x="800" y="388" width="150" height="56" rx="10" />
-            <path className="part__detail" d="M816 396v40M824 396v40M876 396v40M926 396v40M934 396v40" />
-            <Label x="875" y="412" id="oil_cooler" health={health} />
-          </Part>
-
-          {/* ---------- electrical ---------- */}
-          <Part id="alternator" {...common}>
-            <path className="part__pipe part__pipe--thin" d="M700 282L790 270M706 316L790 322" />
-            <circle className="part__shape" cx="804" cy="296" r="30" />
-            <circle className="part__detail-dot" cx="804" cy="296" r="12" />
-            <Label x="804" y="352" id="alternator" health={health} leader="M804 336V326" />
-          </Part>
-
-          <Part id="battery" {...common}>
-            <rect className="part__shape" x="866" y="280" width="120" height="56" rx="8" />
-            <path className="part__detail" d="M882 280v-8h12v8M946 280v-8h12v8" />
-            <Label x="924" y="304" id="battery" health={health} />
-          </Part>
-        </svg>
+          </ul>
+          <p className="sim__ref-note">
+            Both views follow these figures. The 3D model is built to them; the 2D plan view keeps the layout and
+            proportions but is schematic, not to scale. Connecting rod length and casting wall thicknesses are not
+            published by BRP-Rotax and are estimated.
+          </p>
+        </details>
       </section>
 
       <aside className="card sim__detail" aria-label="Selected part">

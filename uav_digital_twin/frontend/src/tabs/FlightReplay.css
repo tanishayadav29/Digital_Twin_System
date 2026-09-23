@@ -1,0 +1,312 @@
+/* ============================================================
+   Flight replay tab
+   ============================================================ */
+.replay-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.replay-tab > * {
+  min-width: 0;
+}
+
+/* ------------------------------------------------------------
+   Date / time picker and transport bar
+   ------------------------------------------------------------ */
+.replay {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+}
+
+.replay__pick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px 14px;
+}
+
+.replay__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.replay__field span {
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.replay__field input,
+.replay__field select {
+  padding: 7px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text-1);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  color-scheme: dark;
+}
+
+.replay__field input:focus-visible,
+.replay__field select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.replay__range {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.replay__days {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.replay__days .btn {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  font-variant-numeric: tabular-nums;
+}
+
+.replay__days .btn span {
+  font-size: 11px;
+  color: var(--text-3);
+}
+
+.replay__error {
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--critical) 45%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--critical) 12%, transparent);
+  font-size: 12.5px;
+  color: var(--text-1);
+}
+
+.replay__transport {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.replay__scrub {
+  flex: 1 1 240px;
+  min-width: 160px;
+  height: 4px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.replay__clock {
+  font-size: 12.5px;
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.replay__speed button {
+  font-variant-numeric: tabular-nums;
+}
+
+.replay__loaded,
+.replay__hint {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+
+.replay__hint {
+  padding: 12px 16px;
+  color: var(--text-2);
+}
+
+.replay__loading {
+  display: grid;
+  place-items: center;
+  height: 260px;
+  font-size: 13px;
+  color: var(--text-3);
+}
+
+/* ------------------------------------------------------------
+   Flight summary strip
+   ------------------------------------------------------------ */
+.replay__summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px 20px;
+  margin: 0;
+  padding: 14px 16px;
+}
+
+.replay__summary dt {
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.replay__summary dd {
+  margin: 3px 0 0;
+  font-size: 17px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+
+.replay__phases {
+  grid-column: 1 / -1;
+}
+
+.replay__phases dd {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  font-size: 12.5px;
+  font-weight: 400;
+  color: var(--text-2);
+}
+
+.replay__phase strong {
+  font-weight: 650;
+  color: var(--text-1);
+}
+
+/* ------------------------------------------------------------
+   Parameters below the scene
+   ------------------------------------------------------------ */
+.replay__params {
+  container-type: inline-size;
+}
+
+.replay__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(236px, 1fr));
+  gap: 12px;
+}
+
+/* ============================================================
+   3D flight view
+   ============================================================ */
+.flight3d {
+  display: flex;
+  flex-direction: column;
+}
+
+.flight3d__canvas {
+  position: relative;
+  height: clamp(360px, 56vh, 620px);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+  background: #091425;
+  touch-action: none;
+}
+
+.flight3d__canvas canvas {
+  display: block;
+  outline: none;
+}
+
+.flight3d__hud {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 3;
+  display: flex;
+  gap: 6px;
+}
+
+.flight3d__hud .btn {
+  backdrop-filter: blur(6px);
+  background: color-mix(in srgb, var(--surface-2) 82%, transparent);
+}
+
+.flight3d__hud .btn--accent {
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+  background: color-mix(in srgb, var(--accent) 30%, var(--surface-2));
+}
+
+/* Live flight readout, top left */
+.flight3d__readout {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 3;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 20px;
+  margin: 0;
+  padding: 9px 13px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, #0b172c 82%, transparent);
+  backdrop-filter: blur(6px);
+}
+
+.flight3d__readout dt {
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.flight3d__readout dd {
+  margin: 1px 0 0;
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.flight3d__readout dd span {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-3);
+}
+
+.flight3d__caveat {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 8px;
+  z-index: 3;
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-3);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  pointer-events: none;
+}
+
+@media (max-width: 720px) {
+  .flight3d__readout {
+    gap: 2px 12px;
+    padding: 7px 10px;
+  }
+
+  .flight3d__readout dd {
+    font-size: 13px;
+  }
+}

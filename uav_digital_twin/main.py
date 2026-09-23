@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import anyio
@@ -515,35 +515,74 @@ def get_latest_sensor_data():
 # ============================================================
 
 @app.get("/sensor-history")
-def get_sensor_history(limit: int = 50):
+def get_sensor_history(
+    limit: Optional[int] = None,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None
+):
 
     db = SessionLocal()
 
     try:
 
         # ----------------------------------------------------
-        # Safety:
-        # User bahut bada limit na bhej sake.
-        # Maximum 500 readings allow kar rahe hain.
+        # Do modes:
+        #
+        # 1. start / end diye bina  -> purana behaviour:
+        #    sabse nayi `limit` readings (default 50, max 500).
+        #    Dashboard startup backfill isi ko use karta hai.
+        #
+        # 2. start / end ke saath   -> history replay window:
+        #    us time range ki readings, puraani se nayi tak.
+        #    Yahan limit bada hai (1 Hz par 1 ghanta = 3600).
+        #
+        # Naive datetime (bina timezone ke) ko UTC maan lete hain,
+        # kyunki simulator UTC bhejta hai.
         # ----------------------------------------------------
 
-        if limit < 1:
-            limit = 1
+        windowed = start is not None or end is not None
 
-        if limit > 500:
-            limit = 500
+        if windowed:
+            limit = 3600 if limit is None else limit
+            limit = max(1, min(limit, 5000))
+        else:
+            limit = 50 if limit is None else limit
+            limit = max(1, min(limit, 500))
+
+
+        query = db.query(EngineSensorData)
+
+        if start is not None:
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=timezone.utc)
+            query = query.filter(EngineSensorData.timestamp >= start)
+
+        if end is not None:
+            if end.tzinfo is None:
+                end = end.replace(tzinfo=timezone.utc)
+            query = query.filter(EngineSensorData.timestamp <= end)
 
 
         # ----------------------------------------------------
-        # PostgreSQL se latest readings retrieve karo
+        # PostgreSQL se readings retrieve karo.
+        # Window mode purani -> nayi (replay isi order mein
+        # chalta hai), warna nayi -> purani (jaisa pehle tha).
         # ----------------------------------------------------
 
-        readings = (
-            db.query(EngineSensorData)
-            .order_by(EngineSensorData.id.desc())
-            .limit(limit)
-            .all()
-        )
+        if windowed:
+            readings = (
+                query
+                .order_by(EngineSensorData.timestamp.asc())
+                .limit(limit)
+                .all()
+            )
+        else:
+            readings = (
+                query
+                .order_by(EngineSensorData.id.desc())
+                .limit(limit)
+                .all()
+            )
 
 
         result = []
@@ -589,6 +628,10 @@ def get_sensor_history(limit: int = 50):
 
             "total_readings": len(result),
 
+            # Window ne limit ko chhu liya, matlab readings aur bhi hain.
+            # Dashboard ise dikhata hai taaki aadha flight poora na lage.
+            "truncated": windowed and len(result) >= limit,
+
             "readings": result
         }
 
@@ -606,6 +649,123 @@ def get_sensor_history(limit: int = 50):
     finally:
 
         db.close()
+
+
+# ============================================================
+# GET DATA RANGE
+# ============================================================
+# GET /data-range
+#
+# History replay ke date picker ke liye. Batata hai ki database
+# mein data kab se kab tak hai, aur kis din kitni readings hain,
+# taaki user khaali date select karke confuse na ho.
+#
+# Response:
+#
+# {
+#   "first": "2026-09-18T09:12:04+00:00",
+#   "last":  "2026-09-23T17:45:31+00:00",
+#   "total_readings": 48210,
+#   "days": [ {"date": "2026-09-23", "readings": 8400,
+#              "first": "...", "last": "..."} ]
+# }
+#
+# days newest-first aate hain, zyada se zyada 60 din.
+# ============================================================
+
+@app.get("/data-range")
+def get_data_range(engine_id: Optional[str] = None):
+
+    db = SessionLocal()
+
+    try:
+
+        query = db.query(EngineSensorData)
+
+        if engine_id:
+            query = query.filter(EngineSensorData.engine_id == engine_id)
+
+
+        # ----------------------------------------------------
+        # Overall span
+        # ----------------------------------------------------
+
+        first, last, total = (
+            query
+            .with_entities(
+                func.min(EngineSensorData.timestamp),
+                func.max(EngineSensorData.timestamp),
+                func.count(EngineSensorData.id)
+            )
+            .one()
+        )
+
+        if total == 0:
+            return {
+                "first": None,
+                "last": None,
+                "total_readings": 0,
+                "days": []
+            }
+
+
+        # ----------------------------------------------------
+        # Per-day counts
+        # ----------------------------------------------------
+
+        day = func.date_trunc("day", EngineSensorData.timestamp).label("day")
+
+        rows = (
+            query
+            .with_entities(
+                day,
+                func.count(EngineSensorData.id),
+                func.min(EngineSensorData.timestamp),
+                func.max(EngineSensorData.timestamp)
+            )
+            .group_by(day)
+            .order_by(day.desc())
+            .limit(60)
+            .all()
+        )
+
+        days = [
+            {
+                "date": row[0].date().isoformat(),
+                "readings": row[1],
+                "first": row[2],
+                "last": row[3]
+            }
+            for row in rows
+        ]
+
+
+        return {
+
+            "first": first,
+
+            "last": last,
+
+            "total_readings": total,
+
+            "days": days
+        }
+
+
+    except Exception as e:
+
+        return {
+
+            "message": "Failed to retrieve data range",
+
+            "error": str(e)
+        }
+
+
+    finally:
+
+        db.close()
+
 
 # ============================================================
 # GET ENGINE HEALTH STATUS

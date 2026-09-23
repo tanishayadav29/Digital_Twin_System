@@ -8,7 +8,7 @@ import {
   WS_PATH,
   WS_RETRY_MS,
 } from '../config/app.js'
-import { SENSORS } from '../config/sensors.js'
+import { normalize } from '../lib/readings.js'
 import { createSimulator } from '../lib/simulator.js'
 
 const WS_URL =
@@ -17,28 +17,6 @@ const WS_URL =
 
 // Database history older than the widest trend range is never shown
 const BACKFILL_MAX_AGE_MS = Math.max(...TREND_RANGES.map((r) => r.ms))
-
-// The simulator sends UTC. Some DB drivers hand it back without a zone
-// ("2026-09-10T14:46:12"), which the browser would read as local time.
-function withZone(timestamp) {
-  if (typeof timestamp !== 'string') return timestamp
-  return /(?:[zZ]|[+-]\d\d:?\d\d)$/.test(timestamp) ? timestamp : `${timestamp}Z`
-}
-
-// Accepts both shapes the backend produces:
-//   WebSocket / simulator / GET /sensor-history: { engine_id, timestamp, rpm, cht, ... }
-//   GET /latest-sensor-data:                     { id, engine_id, timestamp, sensors: { rpm, cht, ... } }
-// receivedAt is when this browser got the reading live; 0 = loaded from the database.
-function normalize(msg, receivedAt) {
-  const timestamp = withZone(msg?.timestamp)
-  const time = Date.parse(timestamp)
-  if (!Number.isFinite(time)) return null
-  const src = msg.sensors ?? msg
-  const values = {}
-  for (const { key } of SENSORS) values[key] = typeof src[key] === 'number' ? src[key] : null
-  // fault = the detector's result for this reading (live stream only; database rows have none)
-  return { engineId: msg.engine_id ?? null, timestamp, time, receivedAt, values, fault: msg.fault ?? null }
-}
 
 // Keeps the buffer sorted by time with one entry per timestamp. Live readings
 // normally just append; database history is merged in wherever it belongs.
@@ -68,6 +46,8 @@ function addReadings(prev, incoming) {
  *                     polls GET /latest-sensor-data every second and keeps
  *                     retrying the socket, so the gauges keep moving either way.
  * source 'simulator': generates readings in the browser, no backend needed.
+ * source 'idle':      does nothing - used while history replay is driving the
+ *                     dashboard instead.
  *
  * Returns { latest, history, link, transport }
  *   history:   readings sorted oldest -> newest, at most HISTORY_SIZE
@@ -90,6 +70,14 @@ export function useTelemetry({ source, onAnomaly }) {
     const push = (msg) => {
       const reading = normalize(msg, Date.now())
       if (reading) setHistory((prev) => addReadings(prev, [reading]))
+    }
+
+    // History replay owns the dashboard while it is on, so don't hold a socket
+    // or a poll timer open behind it (see hooks/useReplay.js).
+    if (source === 'idle') {
+      setLink('offline')
+      setTransport(null)
+      return undefined
     }
 
     if (source === 'simulator') {

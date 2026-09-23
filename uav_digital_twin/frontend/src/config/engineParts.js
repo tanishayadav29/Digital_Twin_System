@@ -19,7 +19,8 @@ export const ENGINE_PARTS = [
   {
     id: 'gearbox',
     label: 'Reduction drive',
-    blurb: 'Gears the engine down to propeller speed. Wear shows as vibration at a steady RPM.',
+    blurb:
+      'Gears the engine down to propeller speed through the 912’s 2.43:1 drive. Wear shows as vibration at a steady RPM.',
     sensors: ['vibration', 'rpm'],
     faults: ['ABNORMAL_VIBRATION', 'HIGH_VIBRATION'],
   },
@@ -50,7 +51,8 @@ export const ENGINE_PARTS = [
     id: 'combustion',
     short: 'Ignition',
     label: 'Ignition & combustion',
-    blurb: 'Spark plugs and the burn itself. A misfire drops RPM and exhaust temperature while vibration climbs.',
+    blurb:
+      'Dual electronic ignition firing two plugs in every cylinder, and the burn itself. A misfire drops RPM and exhaust temperature while vibration climbs.',
     sensors: ['egt', 'rpm', 'vibration'],
     faults: ['MISFIRE', 'COMBUSTION_INSTABILITY'],
   },
@@ -63,9 +65,10 @@ export const ENGINE_PARTS = [
   },
   {
     id: 'cooling',
-    short: 'Cooling air',
-    label: 'Cooling airflow',
-    blurb: 'Air through the cowling carries heat off the cylinders and oil cooler.',
+    short: 'Cooling',
+    label: 'Cooling system',
+    blurb:
+      'The 912 is cooled two ways at once: coolant through the heads and radiator, ram air over the cylinder barrel fins and the oil cooler.',
     sensors: ['cht', 'oil_temperature'],
     faults: ['OVERHEATING'],
   },
@@ -93,9 +96,10 @@ export const ENGINE_PARTS = [
   },
   {
     id: 'oil_sump',
-    short: 'Oil sump',
-    label: 'Oil sump',
-    blurb: 'Holds the oil the pump picks up. Low level shows as falling pressure and rising temperature.',
+    short: 'Oil tank',
+    label: 'Oil tank',
+    blurb:
+      'The 912 runs a dry sump, so the oil lives in a separate tank rather than a pan under the crank. Low level shows as falling pressure and rising temperature.',
     sensors: ['oil_pressure', 'oil_temperature'],
     faults: ['LUBRICATION_ISSUE', 'LOW_OIL_PRESSURE'],
   },

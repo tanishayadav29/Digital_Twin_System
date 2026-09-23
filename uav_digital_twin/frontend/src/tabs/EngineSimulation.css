@@ -156,6 +156,15 @@
   stroke-width: 1.5;
 }
 
+/* Cylinder numbers, stamped on each head like the real casting */
+.part__num {
+  fill: var(--line);
+  font-size: 13px;
+  font-weight: 700;
+  opacity: 0.6;
+  pointer-events: none;
+}
+
 /* connecting rod */
 .part__rod {
   fill: none;
@@ -435,4 +444,225 @@
 
 .sim__worst {
   display: flex;
+}
+
+/* ============================================================
+   3D engine view
+   ============================================================ */
+.sim__view {
+  flex: 0 0 auto;
+}
+
+.sim__loading {
+  display: grid;
+  place-items: center;
+  height: 420px;
+  color: var(--text-3);
+  font-size: 13px;
+}
+
+.eng3d {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.eng3d__canvas {
+  position: relative;
+  height: clamp(380px, 58vh, 620px);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: #0b1628;
+  touch-action: none;
+}
+
+.eng3d__canvas canvas {
+  display: block;
+  outline: none;
+}
+
+/* Floating controls over the viewport */
+.eng3d__hud {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  z-index: 3;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  max-width: calc(100% - 20px);
+}
+
+.eng3d__hud .btn {
+  backdrop-filter: blur(6px);
+  background: color-mix(in srgb, var(--surface-2) 82%, transparent);
+}
+
+.eng3d__hud .btn--accent {
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+  background: color-mix(in srgb, var(--accent) 30%, var(--surface-2));
+}
+
+.eng3d__readout {
+  position: absolute;
+  left: 12px;
+  bottom: 10px;
+  z-index: 3;
+  margin: 0;
+  padding: 6px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  backdrop-filter: blur(6px);
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.eng3d__readout strong {
+  color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+}
+
+.eng3d__hint {
+  margin: 0 2px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+/* Part name plates drawn inside the 3D scene */
+.eng3d__tag {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 4px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: color-mix(in srgb, #0b172c 86%, transparent);
+  box-shadow: 0 6px 18px -8px rgba(0, 0, 0, 0.8);
+  font: 600 12px/1.2 var(--font);
+  color: var(--text-1);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.eng3d__tag.is-selected {
+  border-color: var(--accent);
+}
+
+.eng3d__tag-pct {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.eng3d__tag--normal .eng3d__tag-pct {
+  color: var(--good);
+}
+.eng3d__tag--warning .eng3d__tag-pct {
+  color: var(--warning);
+}
+.eng3d__tag--critical .eng3d__tag-pct {
+  color: var(--critical);
+}
+.eng3d__tag--nodata .eng3d__tag-pct {
+  color: var(--text-3);
+}
+
+/* Where the model's dimensions come from */
+.sim__ref {
+  margin: 10px 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.sim__ref > summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  padding: 9px 13px;
+  font-size: 12.5px;
+  font-weight: 650;
+  list-style: none;
+  cursor: pointer;
+}
+
+.sim__ref > summary::-webkit-details-marker {
+  display: none;
+}
+
+.sim__ref > summary::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-right: 2px solid var(--text-3);
+  border-bottom: 2px solid var(--text-3);
+  transform: rotate(-45deg);
+  transition: transform 0.2s;
+}
+
+.sim__ref[open] > summary::before {
+  transform: rotate(45deg);
+}
+
+.sim__ref > summary span {
+  font-weight: 400;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.sim__ref-specs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 8px 18px;
+  margin: 0;
+  padding: 4px 13px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.sim__ref-specs dt {
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.sim__ref-specs dd {
+  margin: 1px 0 0;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+
+.sim__ref-links {
+  margin: 0;
+  padding: 0 13px 6px;
+  list-style: none;
+  font-size: 12px;
+}
+
+.sim__ref-links li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 8px;
+  padding: 3px 0;
+}
+
+.sim__ref-links a {
+  color: var(--accent);
+}
+
+.sim__ref-links span {
+  color: var(--text-3);
+}
+
+.sim__ref-note {
+  margin: 0;
+  padding: 0 13px 12px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-3);
 }
