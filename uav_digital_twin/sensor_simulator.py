@@ -157,6 +157,19 @@ FAULTS = {
     }
 }
 
+# ============================================================
+# LONG-TERM WEAR (for ML/generate_fleet_dataset.py)
+# ============================================================
+# Baseline shift at cumulative_wear = 1.0 (end of life); scales
+# linearly with wear. DESIGN ASSUMPTION, not measured data: a worn
+# engine runs a bit hotter (tired cooling / deposits), holds less
+# oil pressure (bearing clearances open up) and shakes more.
+#
+# Only used offline. Running the live simulator with wear > 0 makes
+# the v2 detector see "CHT too high for this RPM" all the time,
+# because it was trained on a new (wear 0) engine.
+WEAR_SHIFT = {"cht": 15.0, "oil_pressure": -8.0, "vibration": 0.25}
+
 # Episode timing (simulated seconds): (min, max)
 FAULT_RAMP = (150, 240)       # DEVELOPING: pehle symptom se full severity tak
 FAULT_HOLD = (60, 120)        # ACTIVE: full severity
@@ -216,9 +229,14 @@ class FaultEpisode:
 
 class EngineSimulator:
 
-    def __init__(self, profile="cruise", fault_types=None, faults_enabled=True, fault_after=120, seed=None, noise_scale=1.0):
+    def __init__(self, profile="cruise", fault_types=None, faults_enabled=True, fault_after=120, seed=None, noise_scale=1.0,
+                 cumulative_wear=0.0):
 
         self.rng = random.Random(seed)
+
+        # Long-term wear (0 = new engine, 1.0 = end of life), see WEAR_SHIFT.
+        # Default 0.0 -> readings are exactly the same as before.
+        self.cumulative_wear = cumulative_wear
         self.profile = profile
         self.fault_types = fault_types or list(FAULTS)
         self.faults_enabled = faults_enabled
@@ -302,10 +320,11 @@ class EngineSimulator:
 
         r = (self.rpm - 2800) / 100
         ambient = self.ambient
+        wear = self.cumulative_wear
 
         self.cht = lag(
             self.cht,
-            185 + 5 * r + spec["cooling"] + 0.8 * ambient + fx["cht"],
+            185 + 5 * r + spec["cooling"] + 0.8 * ambient + fx["cht"] + WEAR_SHIFT["cht"] * wear,
             60,
             dt
         )
@@ -321,10 +340,10 @@ class EngineSimulator:
             "rpm": self.rpm + fx["rpm"],
             "cht": self.cht,
             "egt": 720 + 12 * r + 2 * ambient + fx["egt"],
-            "oil_pressure": 45 + 1.2 * r - 0.25 * (self.oil_temperature - 90) + fx["oil_pressure"],
+            "oil_pressure": 45 + 1.2 * r - 0.25 * (self.oil_temperature - 90) + fx["oil_pressure"] + WEAR_SHIFT["oil_pressure"] * wear,
             "oil_temperature": self.oil_temperature,
             "fuel_flow": 12 + 0.9 * r + fx["fuel_flow"],
-            "vibration": 0.30 + 0.025 * r + fx["vibration"],
+            "vibration": 0.30 + 0.025 * r + fx["vibration"] + WEAR_SHIFT["vibration"] * wear,
             "battery_voltage": 24.5 + 0.1 * self.load + fx["battery_voltage"],
             "alternator_current": 8 + 0.15 * r + self.load + fx["alternator_current"],
             "injection_timing": 12 + 0.15 * r + fx["injection_timing"]

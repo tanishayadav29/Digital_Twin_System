@@ -1,15 +1,22 @@
+import zlib
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import anyio
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func
 
 from database import SessionLocal
-from models import EngineSensorData, FaultEvent
+from models import EngineSensorData, FaultEvent, EngineWearState, EngineWearHistory
 
 from ML.fault_detector_v2 import detect_fault
+
+# RUL feature (additive)
+from ML import rul_estimator
+from ML.rul_estimator import estimate_rul_seconds
+from ML.rul_years import TREND_FLIGHTS, estimate_rul_years
+from ML.generate_fleet_dataset import simulate_flight
 
 
 app = FastAPI(
@@ -128,6 +135,22 @@ def receive_sensor_data(data: SensorDataRequest):
 
 
     # --------------------------------------------------------
+    # STEP 0b: Short-term RUL
+    # --------------------------------------------------------
+    # observe() har reading par chalta hai (60 s trend window ko
+    # anomaly se pehle ki readings bhi chahiye). Model sirf
+    # ANOMALY par chalta hai.
+    # --------------------------------------------------------
+
+    rul_estimator.observe(data.model_dump(), detected_fault)
+
+    rul = None
+
+    if detected_fault["status"] == "ANOMALY":
+        rul = estimate_rul_seconds(data.model_dump(), detected_fault["fault_type"])
+
+
+    # --------------------------------------------------------
     # STEP 1: Live dashboards par broadcast
     # --------------------------------------------------------
     # Reading (aur anomaly mili toh alert bhi) turant saare
@@ -141,7 +164,9 @@ def receive_sensor_data(data: SensorDataRequest):
 
     live_message = data.model_dump(mode="json")
     live_message["type"] = "reading"
-    live_message["fault"] = detected_fault
+    # rul fault ke andar bhi (frontend ka lib/readings.js sirf msg.fault rakhta hai)
+    live_message["fault"] = {**detected_fault, "rul": rul}
+    live_message["estimated_rul_seconds"] = rul["seconds"] if rul else None
 
     anyio.from_thread.run(broadcaster.broadcast, live_message)
 
@@ -156,7 +181,9 @@ def receive_sensor_data(data: SensorDataRequest):
             "severity": detected_fault["severity"],
             "anomaly_score": detected_fault["anomaly_score"],
             "model_prediction": detected_fault["model_prediction"],
-            "sensors": detected_fault["sensors"]
+            "sensors": detected_fault["sensors"],
+            "estimated_rul_seconds": rul["seconds"] if rul else None,
+            "rul": rul
         }
 
         anyio.from_thread.run(broadcaster.broadcast, anomaly_message)
@@ -213,7 +240,9 @@ def receive_sensor_data(data: SensorDataRequest):
 
                 description=(
                     f"ML detected {detected_fault['fault_type']}"
-                )
+                ),
+
+                estimated_rul_seconds=rul["seconds"] if rul else None
             )
 
             db.add(fault_event)
@@ -229,7 +258,9 @@ def receive_sensor_data(data: SensorDataRequest):
 
                 "fault_event_id": fault_event.id,
 
-                "fault": detected_fault
+                "fault": detected_fault,
+
+                "rul": rul
             }
 
 
@@ -301,7 +332,8 @@ def get_fault_events():
                 "severity": fault.severity,
                 "detected_at": fault.detected_at,
                 "confidence": fault.confidence,
-                "description": fault.description
+                "description": fault.description,
+                "estimated_rul_seconds": fault.estimated_rul_seconds
             })
 
         return {
@@ -1037,3 +1069,191 @@ def receive_sensor_data_ml(data: SensorDataRequest):
         "fault_detection": result
     }
 
+
+# ============================================================
+# RUL FEATURE - ENDPOINTS
+# ============================================================
+# Short-term RUL (seconds to critical, per active fault):
+#   computed in receive_sensor_data() above -> WebSocket + FaultEvent
+#
+# Long-term RUL (years, Palmgren-Miner cumulative wear):
+#   POST /engine-wear/{engine_id}     {"wear": 0.0-1.0}  set wear by hand
+#   POST /simulate-flight/{engine_id} ?flights=1         simulate flights, add their damage
+#   GET  /rul-years/{engine_id}                          years of life left
+#
+# Wear sirf in POST endpoints se badalta hai - server restart ya
+# sensor readings se kabhi nahi - taaki demo repeatable rahe.
+# ============================================================
+
+class EngineWearRequest(BaseModel):
+
+    wear: float = Field(ge=0.0, le=1.0)
+
+
+def _flight_seed(engine_id, flight_index):
+
+    # Same engine + same flight number -> same simulated flight (reproducible demos)
+    return (zlib.crc32(engine_id.encode()) % 1_000_000) * 100_000 + flight_index
+
+
+def _wear_history(db, engine_id):
+
+    rows = (
+        db.query(EngineWearHistory)
+        .filter(EngineWearHistory.engine_id == engine_id)
+        .order_by(EngineWearHistory.flight_num.desc())
+        .limit(TREND_FLIGHTS)
+        .all()
+    )
+
+    return [
+        {
+            "flight_num": row.flight_num,
+            "damage_this_flight": row.damage_this_flight,
+            "fault_count_this_flight": row.fault_count_this_flight,
+            "mean_cht": row.mean_cht,
+            "mean_vibration": row.mean_vibration,
+            "max_vibration": row.max_vibration,
+        }
+        for row in reversed(rows)
+    ]
+
+
+def _rul_years_payload(db, engine_id):
+
+    state = db.get(EngineWearState, engine_id)
+    wear = state.cumulative_wear if state else 0.0
+    history = _wear_history(db, engine_id)
+
+    return {
+        "engine_id": engine_id,
+        "cumulative_wear": round(wear, 4),
+        "wear_recorded": state is not None,
+        "flights_logged": state.flights_logged if state else 0,
+        "last_updated": state.last_updated if state else None,
+        "recent_flights": len(history),
+        "recent_damage_per_flight": (
+            round(sum(h["damage_this_flight"] for h in history[-10:]) / len(history[-10:]), 5)
+            if history else None
+        ),
+        "rul": estimate_rul_years(wear, history)
+    }
+
+
+@app.post("/engine-wear/{engine_id}")
+def set_engine_wear(engine_id: str, body: EngineWearRequest):
+
+    db = SessionLocal()
+
+    try:
+
+        now = datetime.now(timezone.utc)
+        state = db.get(EngineWearState, engine_id)
+
+        if state is None:
+            state = EngineWearState(engine_id=engine_id, cumulative_wear=0.0, flights_logged=0, last_updated=now)
+            db.add(state)
+
+        # Hand-set wear: purani flight history is wear se match nahi karti, isliye clear.
+        # flights_logged bhi 0, taaki "set wear -> simulate" har baar same result de.
+        db.query(EngineWearHistory).filter(EngineWearHistory.engine_id == engine_id).delete()
+
+        state.cumulative_wear = body.wear
+        state.flights_logged = 0
+        state.last_updated = now
+
+        db.commit()
+
+        return {"message": "Engine wear set", **_rul_years_payload(db, engine_id)}
+
+    except Exception as e:
+
+        db.rollback()
+        return {"message": "Failed to set engine wear", "error": str(e)}
+
+    finally:
+
+        db.close()
+
+
+@app.post("/simulate-flight/{engine_id}")
+def simulate_engine_flight(engine_id: str, flights: int = 1):
+
+    flights = max(1, min(flights, 200))
+
+    db = SessionLocal()
+
+    try:
+
+        now = datetime.now(timezone.utc)
+        state = db.get(EngineWearState, engine_id)
+
+        if state is None:
+            state = EngineWearState(engine_id=engine_id, cumulative_wear=0.0, flights_logged=0, last_updated=now)
+            db.add(state)
+
+        summaries = []
+
+        for _ in range(flights):
+
+            if state.cumulative_wear >= 1.0:
+                break
+
+            flight = simulate_flight(state.cumulative_wear, _flight_seed(engine_id, state.flights_logged))
+
+            before = state.cumulative_wear
+            state.cumulative_wear = before + flight["damage_this_flight"]
+            state.flights_logged += 1
+
+            db.add(EngineWearHistory(
+                engine_id=engine_id,
+                flight_num=state.flights_logged,
+                wear_before=before,
+                wear_after=state.cumulative_wear,
+                damage_this_flight=flight["damage_this_flight"],
+                flight_hours=flight["flight_hours"],
+                mean_cht=flight["mean_cht"],
+                mean_vibration=flight["mean_vibration"],
+                max_vibration=flight["max_vibration"],
+                hours_above_cht_limit=flight["hours_above_cht_limit"],
+                fault_count_this_flight=flight["fault_count_this_flight"],
+                fault_type=flight["fault_type"] or None,
+                recorded_at=now
+            ))
+
+            summaries.append({"flight_num": state.flights_logged, **flight})
+
+        state.last_updated = now
+        db.commit()
+
+        return {
+            "message": f"Simulated {len(summaries)} flight(s)" + (
+                "" if len(summaries) == flights else " - engine reached end of life"
+            ),
+            "flights": summaries[-10:],
+            **_rul_years_payload(db, engine_id)
+        }
+
+    except Exception as e:
+
+        db.rollback()
+        return {"message": "Failed to simulate flight", "error": str(e)}
+
+    finally:
+
+        db.close()
+
+
+@app.get("/rul-years/{engine_id}")
+def get_rul_years(engine_id: str):
+
+    db = SessionLocal()
+
+    try:
+        return _rul_years_payload(db, engine_id)
+
+    except Exception as e:
+        return {"message": "Failed to estimate engine life", "error": str(e)}
+
+    finally:
+        db.close()
