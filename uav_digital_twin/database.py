@@ -1,24 +1,29 @@
 import os
 
-from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-
-# .env file load karo
-load_dotenv()
-
-# Database URL read karo
-DATABASE_URL = os.getenv("DATABASE_URL")
+from models import Base
 
 
-# PostgreSQL ke saath SQLAlchemy engine
-engine = create_engine(DATABASE_URL)
+# SQLite database file
+DATABASE_URL = "sqlite:///./uav_digital_twin.db"
 
 
-# Database Session create karne ka setup
+# SQLite engine
+engine = create_engine(
+    DATABASE_URL,
+    connect_args={"check_same_thread": False}
+)
+
+
+# Database session
 SessionLocal = sessionmaker(
     bind=engine,
     autoflush=False,
     autocommit=False
 )
+
+
+# Tables create karo agar pehle se nahi hain
+Base.metadata.create_all(bind=engine)

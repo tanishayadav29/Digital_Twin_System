@@ -11,7 +11,7 @@ from sklearn.ensemble import HistGradientBoostingRegressor, IsolationForest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from ML.engine_features import (  # noqa: E402
+from ML.engine_features import (
     RESIDUAL_SENSORS,
     RPM_TIME_CONSTANTS,
     WINDOW_SECONDS,
@@ -22,169 +22,671 @@ from ML.engine_features import (  # noqa: E402
     residual_matrix,
     rolling_matrix,
     rpm_feature_matrix,
+    physics_residual_matrix,
 )
 
 
 # ============================================================
-# TRAIN MODEL v2
+# TRAIN MODEL v2 + PHYSICS RESIDUAL
 # ============================================================
-# Sirf healthy data se seekhta hai (koi fault label use nahi hota).
 #
-# STEP 1  BASELINE     har sensor ke liye regression: RPM (aur uske
-#                      averages) -> expected sensor value
-# STEP 2  FEATURES     residuals -> 30 s rolling mean
-#                      (ML/engine_features.py)
-# STEP 3  DETECTORS    a) Isolation Forest - kai sensors ka combined pattern
-#                      b) Residual limit   - koi ek sensor expected se door
-# STEP 4  THRESHOLDS   alag validation data par, taaki healthy engine par
-#                      ~0.5 flagged readings / hour se zyada na aayein
+# STEP 1
+#   RPM -> expected sensor value
 #
-# Model v1 (isolation_forest.pkl + fault_detector.py) ko ye touch
-# nahi karta. Output: ML/models/engine_model_v2.pkl
+# STEP 2
+#   EGT -> expected CHT
+#   This is the physics-informed relationship.
 #
-# USAGE (uav_digital_twin folder se, pehle generate_dataset.py):
-#   python ML/train_model_v2.py
+# STEP 3
+#   Build residual features + 30 sec rolling mean
+#
+# STEP 4
+#   Isolation Forest
+#
+# STEP 5
+#   Thresholds using healthy validation data
+#
+# Output:
+#
+#   ML/models/engine_model_v2.pkl
+#
 # ============================================================
+
 
 ML_DIR = Path(__file__).resolve().parent
 
-# ASCII only - Windows consoles can't always print ° or ±
+
+# ============================================================
+# UNITS
+# ============================================================
+
 UNITS = {
-    "cht": "degC", "egt": "degC", "oil_pressure": "psi", "oil_temperature": "degC", "fuel_flow": "L/h",
-    "vibration": "g", "battery_voltage": "V", "alternator_current": "A", "injection_timing": "deg"
+    "cht": "degC",
+    "egt": "degC",
+    "oil_pressure": "psi",
+    "oil_temperature": "degC",
+    "fuel_flow": "L/h",
+    "vibration": "g",
+    "battery_voltage": "V",
+    "alternator_current": "A",
+    "injection_timing": "deg",
 }
 
 
+# ============================================================
+# WARM-UP
+# ============================================================
+
 def warmed_up(data):
 
-    # Rows at least one full window after their run started
-    start = {}
-    out = np.zeros(len(data["sim_time"]), dtype=bool)
+    """
+    Rows at least one complete 30-second window
+    after their run started.
+    """
 
-    for i, run in enumerate(data["run_id"]):
-        start.setdefault(run, data["sim_time"][i])
-        out[i] = data["sim_time"][i] - start[run] >= WINDOW_SECONDS
+    start = {}
+
+    out = np.zeros(
+        len(data["sim_time"]),
+        dtype=bool
+    )
+
+    for i, run in enumerate(
+        data["run_id"]
+    ):
+
+        start.setdefault(
+            run,
+            data["sim_time"][i]
+        )
+
+        out[i] = (
+            data["sim_time"][i]
+            - start[run]
+            >= WINDOW_SECONDS
+        )
 
     return out
 
 
+# ============================================================
+# TRAIN PHYSICS MODEL
+# ============================================================
+
+def train_physics_model(
+    train,
+    bundle
+):
+
+    """
+    Learn:
+
+        EGT -> expected CHT
+
+    using healthy training data only.
+
+    Returns:
+
+        physics_regressors
+        physics_residual_scale
+    """
+
+    print(
+        "\nSTEP 1B  Physics relationship: "
+        "EGT -> expected CHT"
+    )
+
+    egt = train["egt"]
+    cht = train["cht"]
+
+    usable = (
+        ~np.isnan(egt)
+        & ~np.isnan(cht)
+    )
+
+    X = egt[usable].reshape(-1, 1)
+    y = cht[usable]
+
+    # Gradient boosting keeps the relationship flexible
+    # rather than forcing a straight line.
+    regressor = HistGradientBoostingRegressor(
+        max_iter=200,
+        random_state=0
+    )
+
+    regressor.fit(
+        X,
+        y
+    )
+
+    predicted = regressor.predict(X)
+
+    residual = y - predicted
+
+    # Robust spread using MAD
+    scale = (
+        1.4826
+        * np.median(
+            np.abs(
+                residual
+                - np.median(residual)
+            )
+        )
+    )
+
+    # Safety fallback in case spread becomes zero
+    scale = max(
+        float(scale),
+        1e-6
+    )
+
+    explained = (
+        1
+        - residual.var()
+        / y.var()
+    )
+
+    print(
+        f"   EGT -> CHT"
+        f" | residual spread +/- {scale:.3f} degC"
+        f" | EGT explains {explained:5.1%} "
+        f"of CHT variation"
+    )
+
+    return (
+        {
+            "cht_from_egt": regressor
+        },
+        {
+            "cht_from_egt": scale
+        }
+    )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
 def main():
 
-    parser = argparse.ArgumentParser(description="Train anomaly model v2 on simulator data")
-    parser.add_argument("--data-dir", type=Path, default=ML_DIR / "data")
-    parser.add_argument("--out", type=Path, default=ML_DIR / "models" / "engine_model_v2.pkl")
-    parser.add_argument(
-        "--false-flags-per-hour", type=float, default=0.5,
-        help="how many healthy readings per hour may be flagged on the validation data (default 0.5)"
+    parser = argparse.ArgumentParser(
+        description=(
+            "Train anomaly model v2 "
+            "with physics-informed residual"
+        )
     )
+
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=ML_DIR / "data"
+    )
+
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=(
+            ML_DIR
+            / "models"
+            / "engine_model_v2.pkl"
+        )
+    )
+
+    parser.add_argument(
+        "--false-flags-per-hour",
+        type=float,
+        default=0.5,
+        help=(
+            "How many healthy readings per hour "
+            "may be flagged on validation data"
+        )
+    )
+
     args = parser.parse_args()
 
     started = time.time()
 
-    train = load_dataset(args.data_dir / "train_normal.csv")
-    val = load_dataset(args.data_dir / "val_normal.csv")
 
-    train_hours = len(train["sim_time"]) / 3600
-    val_hours = len(val["sim_time"]) / 3600
+    # ========================================================
+    # LOAD DATA
+    # ========================================================
 
-    print(f"Training data:   {train_hours:.0f} h healthy ({len(train['sim_time'])} readings)")
-    print(f"Validation data: {val_hours:.0f} h healthy ({len(val['sim_time'])} readings)")
+    train = load_dataset(
+        args.data_dir
+        / "train_normal.csv"
+    )
+
+    val = load_dataset(
+        args.data_dir
+        / "val_normal.csv"
+    )
+
+    train_hours = (
+        len(train["sim_time"])
+        / 3600
+    )
+
+    val_hours = (
+        len(val["sim_time"])
+        / 3600
+    )
+
+    print(
+        f"Training data:   "
+        f"{train_hours:.1f} h healthy "
+        f"({len(train['sim_time'])} readings)"
+    )
+
+    print(
+        f"Validation data: "
+        f"{val_hours:.1f} h healthy "
+        f"({len(val['sim_time'])} readings)"
+    )
 
 
     # ========================================================
-    # STEP 1: BASELINE - expected sensor value for the current RPM
+    # INITIAL MODEL BUNDLE
     # ========================================================
 
     bundle = {
+
         "version": 2,
+
         "sensors": RESIDUAL_SENSORS,
-        "rpm_time_constants": RPM_TIME_CONSTANTS,
-        "window_seconds": WINDOW_SECONDS,
+
+        "rpm_time_constants":
+            RPM_TIME_CONSTANTS,
+
+        "window_seconds":
+            WINDOW_SECONDS,
+
         "regressors": {},
-        "residual_scale": {}
+
+        "residual_scale": {},
+
+        # NEW physics models
+        "physics_regressors": {},
+
+        "physics_residual_scale": {},
     }
 
-    rpm_features = rpm_feature_matrix(train)
-    usable = ~np.isnan(rpm_features).any(axis=1)
 
-    print("\nSTEP 1  Expected value from RPM (spread of healthy readings around it)")
+    # ========================================================
+    # STEP 1
+    # RPM -> EXPECTED SENSOR VALUES
+    # ========================================================
+
+    rpm_features = rpm_feature_matrix(
+        train
+    )
+
+    usable = (
+        ~np.isnan(rpm_features)
+        .any(axis=1)
+    )
+
+    print(
+        "\nSTEP 1  Expected sensor value "
+        "from RPM"
+    )
+
 
     for key in RESIDUAL_SENSORS:
 
-        mask = usable & ~np.isnan(train[key])
+        mask = (
+            usable
+            & ~np.isnan(train[key])
+        )
 
-        regressor = HistGradientBoostingRegressor(max_iter=200, random_state=0)
-        regressor.fit(rpm_features[mask], train[key][mask])
+        regressor = (
+            HistGradientBoostingRegressor(
+                max_iter=200,
+                random_state=0
+            )
+        )
 
-        residual = train[key][mask] - regressor.predict(rpm_features[mask])
+        regressor.fit(
+            rpm_features[mask],
+            train[key][mask]
+        )
 
-        # Robust standard deviation (median absolute deviation)
-        scale = 1.4826 * np.median(np.abs(residual - np.median(residual)))
+        residual = (
+            train[key][mask]
+            - regressor.predict(
+                rpm_features[mask]
+            )
+        )
 
-        bundle["regressors"][key] = regressor
-        bundle["residual_scale"][key] = float(scale)
+        # Robust standard deviation
+        scale = (
+            1.4826
+            * np.median(
+                np.abs(
+                    residual
+                    - np.median(residual)
+                )
+            )
+        )
 
-        explained = 1 - residual.var() / train[key][mask].var()
-        print(f"   {key:19s} +/- {scale:.3f} {UNITS[key]:4s} (RPM explains {explained:5.1%} of its variation)")
+        scale = max(
+            float(scale),
+            1e-6
+        )
+
+        bundle[
+            "regressors"
+        ][key] = regressor
+
+        bundle[
+            "residual_scale"
+        ][key] = scale
+
+        explained = (
+            1
+            - residual.var()
+            / train[key][mask].var()
+        )
+
+        print(
+            f"   {key:19s} "
+            f"+/- {scale:.3f} "
+            f"{UNITS[key]:4s} "
+            f"(RPM explains "
+            f"{explained:5.1%})"
+        )
 
 
     # ========================================================
-    # STEP 2 + 3: FEATURES AND ISOLATION FOREST
+    # STEP 1B
+    # PHYSICS: EGT -> CHT
     # ========================================================
 
-    residuals = residual_matrix(bundle, train, rpm_features)
-    means = rolling_matrix(train, residuals)
-    warm = warmed_up(train)
+    (
+        physics_regressors,
+        physics_scales
+    ) = train_physics_model(
+        train,
+        bundle
+    )
 
-    bundle["z_std"] = means[warm].std(axis=0)
+    bundle[
+        "physics_regressors"
+    ] = physics_regressors
 
-    features = make_features(bundle, means)
-
-    forest = IsolationForest(n_estimators=200, max_samples=512, random_state=42)
-    forest.fit(features[warm])
-
-    bundle["isolation_forest"] = forest
-    bundle["forest_spread"] = float(forest.decision_function(features[warm]).std())
-
-    print(f"\nSTEP 2-3  Isolation Forest trained on {warm.sum()} feature rows ({features.shape[1]} features)")
+    bundle[
+        "physics_residual_scale"
+    ] = physics_scales
 
 
     # ========================================================
-    # STEP 4: THRESHOLDS on validation data
+    # STEP 2
+    # BUILD ALL RESIDUAL FEATURES
     # ========================================================
-    # Budget half-half dono detectors mein
 
-    val_features = features_for(bundle, val)
-    limit, forest_score = raw_scores(bundle, val_features)
+    rpm_residuals = residual_matrix(
+        bundle,
+        train,
+        rpm_features
+    )
 
-    fraction = args.false_flags_per_hour / 2 / 3600
+    physics_residuals = (
+        physics_residual_matrix(
+            bundle,
+            train
+        )
+    )
 
-    bundle["limit_threshold"] = float(np.quantile(limit, 1 - fraction, method="higher"))
-    bundle["forest_threshold"] = float(np.quantile(forest_score, fraction, method="lower"))
-    bundle["false_flags_per_hour_target"] = args.false_flags_per_hour
+    # 9 existing + 1 physics = 10
+    residuals = np.concatenate(
+        [
+            rpm_residuals,
+            physics_residuals
+        ],
+        axis=1
+    )
 
-    limit_flags = limit > bundle["limit_threshold"]
-    forest_flags = forest_score < bundle["forest_threshold"]
+    means = rolling_matrix(
+        train,
+        residuals
+    )
 
-    print("\nSTEP 4  Thresholds (validation data)")
-    print(f"   residual limit   : {bundle['limit_threshold']:.2f} (30 s average, in standard deviations)"
-          f" -> {limit_flags.sum()} flagged readings")
-    print(f"   isolation forest : {bundle['forest_threshold']:+.4f}"
-          f" -> {forest_flags.sum()} flagged readings")
-    print(f"   either           : {(limit_flags | forest_flags).sum() / val_hours:.2f} flagged readings / hour"
-          f" (target {args.false_flags_per_hour:g})")
+    warm = warmed_up(
+        train
+    )
+
+
+    # ========================================================
+    # STEP 3
+    # STANDARDIZATION
+    # ========================================================
+
+    bundle["z_std"] = (
+        means[warm].std(
+            axis=0
+        )
+    )
+
+    # Avoid division by zero
+    bundle["z_std"] = np.maximum(
+        bundle["z_std"],
+        1e-6
+    )
+
+    features = make_features(
+        bundle,
+        means
+    )
+
+    print(
+        "\nSTEP 2  Feature construction"
+    )
+
+    print(
+        f"   Existing residual features : "
+        f"{len(RESIDUAL_SENSORS)}"
+    )
+
+    print(
+        f"   Physics residual features  : "
+        f"{len(bundle['physics_regressors'])}"
+    )
+
+    print(
+        f"   Total features             : "
+        f"{features.shape[1]}"
+    )
+
+
+    # ========================================================
+    # STEP 3
+    # ISOLATION FOREST
+    # ========================================================
+
+    forest = IsolationForest(
+        n_estimators=200,
+        max_samples=512,
+        random_state=42
+    )
+
+    forest.fit(
+        features[warm]
+    )
+
+    bundle[
+        "isolation_forest"
+    ] = forest
+
+    forest_scores = (
+        forest.decision_function(
+            features[warm]
+        )
+    )
+
+    bundle[
+        "forest_spread"
+    ] = float(
+        forest_scores.std()
+    )
+
+    bundle[
+        "forest_spread"
+    ] = max(
+        bundle["forest_spread"],
+        1e-6
+    )
+
+    print(
+        f"\nSTEP 3  Isolation Forest trained "
+        f"on {warm.sum()} feature rows "
+        f"({features.shape[1]} features)"
+    )
+
+
+    # ========================================================
+    # STEP 4
+    # VALIDATION THRESHOLDS
+    # ========================================================
+
+    val_features = features_for(
+        bundle,
+        val
+    )
+
+    limit, forest_score = raw_scores(
+        bundle,
+        val_features
+    )
+
+    # Split false-alarm budget equally
+    fraction = (
+        args.false_flags_per_hour
+        / 2
+        / 3600
+    )
+
+    bundle[
+        "limit_threshold"
+    ] = float(
+        np.quantile(
+            limit,
+            1 - fraction,
+            method="higher"
+        )
+    )
+
+    bundle[
+        "forest_threshold"
+    ] = float(
+        np.quantile(
+            forest_score,
+            fraction,
+            method="lower"
+        )
+    )
+
+    bundle[
+        "false_flags_per_hour_target"
+    ] = args.false_flags_per_hour
+
+
+    limit_flags = (
+        limit
+        > bundle["limit_threshold"]
+    )
+
+    forest_flags = (
+        forest_score
+        < bundle["forest_threshold"]
+    )
+
+    either_flags = (
+        limit_flags
+        | forest_flags
+    )
+
+
+    print(
+        "\nSTEP 4  Thresholds "
+        "(healthy validation data)"
+    )
+
+    print(
+        f"   residual limit   : "
+        f"{bundle['limit_threshold']:.2f}"
+        f" -> {limit_flags.sum()} flagged readings"
+    )
+
+    print(
+        f"   isolation forest : "
+        f"{bundle['forest_threshold']:+.4f}"
+        f" -> {forest_flags.sum()} flagged readings"
+    )
+
+    print(
+        f"   either           : "
+        f"{either_flags.sum() / val_hours:.2f} "
+        f"flagged readings / hour"
+        f" (target "
+        f"{args.false_flags_per_hour:g})"
+    )
+
+
+    # ========================================================
+    # TRAINING INFORMATION
+    # ========================================================
 
     bundle["trained_on"] = {
-        "train_readings": int(len(train["sim_time"])),
-        "val_readings": int(len(val["sim_time"])),
-        "sklearn_version": sklearn.__version__
+
+        "train_readings":
+            int(
+                len(train["sim_time"])
+            ),
+
+        "val_readings":
+            int(
+                len(val["sim_time"])
+            ),
+
+        "feature_count":
+            int(
+                features.shape[1]
+            ),
+
+        "physics_features":
+            [
+                "cht_from_egt"
+            ],
+
+        "sklearn_version":
+            sklearn.__version__
     }
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    joblib.dump(bundle, args.out, compress=3)
 
-    print(f"\nSaved {args.out} ({args.out.stat().st_size / 1e6:.1f} MB) in {time.time() - started:.0f}s")
+    # ========================================================
+    # SAVE MODEL
+    # ========================================================
 
+    args.out.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    joblib.dump(
+        bundle,
+        args.out,
+        compress=3
+    )
+
+    print(
+        f"\nSaved {args.out} "
+        f"({args.out.stat().st_size / 1e6:.1f} MB) "
+        f"in {time.time() - started:.0f}s"
+    )
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
     main()
