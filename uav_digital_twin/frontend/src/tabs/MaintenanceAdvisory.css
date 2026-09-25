@@ -329,3 +329,40 @@
   font-size: 12.5px;
   color: var(--text-3);
 }
+
+.advice__predictive {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--track);
+}
+
+.advice__predictive-title {
+  margin-bottom: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.advice__predictive-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.advice__predictive-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.advice__predictive-grid span {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.advice__predictive-grid strong {
+  font-size: 14px;
+}

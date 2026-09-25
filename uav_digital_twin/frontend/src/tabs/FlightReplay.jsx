@@ -1,9 +1,11 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react'
 import { SensorCard } from '../components/SensorCard.jsx'
+import { MissionHealthReport } from '../components/MissionHealthReport.jsx'
 import { REPLAY_SPEEDS, REPLAY_WINDOWS } from '../config/app.js'
 import { SENSORS, sensorStatus } from '../config/sensors.js'
 import { PHASES, flightSummary, reconstructFlight } from '../lib/flightPath.js'
 import './FlightReplay.css'
+import { formatDuration } from '../lib/missionReport.js'
 
 // three.js only loads when this tab is opened.
 const FlightScene = lazy(() => import('../components/flight3d/FlightScene.jsx'))
@@ -162,6 +164,8 @@ export function FlightReplay({ telemetry, stale, source, replay }) {
   const frames = useMemo(() => reconstructFlight(basis), [basis])
   const summary = useMemo(() => flightSummary(frames), [frames])
 
+  
+
   // Live mode has no playhead of its own, so the scene advances its own clock.
   const liveTimeRef = useRef(null)
   const timeRef = isReplay ? replay.playheadRef : liveTimeRef
@@ -196,20 +200,24 @@ export function FlightReplay({ telemetry, stale, source, replay }) {
             <dt>Readings</dt>
             <dd>{summary.readings.toLocaleString()}</dd>
           </div>
+
           <div>
             <dt>Covered</dt>
             <dd>{duration(summary.durationMs)}</dd>
           </div>
+
           <div>
             <dt>Track flown</dt>
             <dd>{(summary.distance / 1000).toFixed(2)} km</dd>
           </div>
+
           <div>
             <dt>Altitude band</dt>
             <dd>
               {Math.round(summary.lowest)}–{Math.round(summary.highest)} m
             </dd>
           </div>
+
           <div className="replay__phases">
             <dt>Phases</dt>
             <dd>
@@ -222,6 +230,8 @@ export function FlightReplay({ telemetry, stale, source, replay }) {
           </div>
         </dl>
       )}
+
+      
 
       <section className="replay__params" aria-label="Parameters at this moment">
         <header className="section-head">
@@ -249,6 +259,10 @@ export function FlightReplay({ telemetry, stale, source, replay }) {
           ))}
         </div>
       </section>
+      <MissionHealthReport
+        readings={basis}
+        summary={summary}
+      />
     </div>
   )
 }

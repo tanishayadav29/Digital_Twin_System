@@ -366,14 +366,18 @@ def get_fault_events():
 # ============================================================
 
 @app.get("/fault-summary")
-def get_fault_summary(engine_id: Optional[str] = None):
+def get_fault_summary(
+    engine_id: Optional[str] = None,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+):
 
     db = SessionLocal()
 
     try:
 
         # ----------------------------------------------------
-        # Count + pehla / aakhri occurrence, fault type ke hisaab se
+        # Base query
         # ----------------------------------------------------
 
         counts = db.query(
@@ -383,44 +387,139 @@ def get_fault_summary(engine_id: Optional[str] = None):
             func.max(FaultEvent.detected_at)
         )
 
-        if engine_id:
-            counts = counts.filter(FaultEvent.engine_id == engine_id)
-
-        rows = counts.group_by(FaultEvent.fault_type).all()
-
-
         # ----------------------------------------------------
-        # Ek fault type alag-alag severity ke saath aa sakta hai
+        # Optional filters
         # ----------------------------------------------------
 
-        pairs = db.query(FaultEvent.fault_type, FaultEvent.severity).distinct()
+        if engine_id:
+            counts = counts.filter(
+                FaultEvent.engine_id == engine_id
+            )
+
+        if start:
+            counts = counts.filter(
+                FaultEvent.detected_at >= start
+            )
+
+        if end:
+            counts = counts.filter(
+                FaultEvent.detected_at <= end
+            )
+
+        rows = (
+            counts
+            .group_by(FaultEvent.fault_type)
+            .all()
+        )
+
+        # ----------------------------------------------------
+        # Severity values for the filtered fault events
+        # ----------------------------------------------------
+
+        pairs = db.query(
+            FaultEvent.fault_type,
+            FaultEvent.severity
+        ).distinct()
 
         if engine_id:
-            pairs = pairs.filter(FaultEvent.engine_id == engine_id)
+            pairs = pairs.filter(
+                FaultEvent.engine_id == engine_id
+            )
+
+        if start:
+            pairs = pairs.filter(
+                FaultEvent.detected_at >= start
+            )
+
+        if end:
+            pairs = pairs.filter(
+                FaultEvent.detected_at <= end
+            )
 
         severities = {}
 
         for fault_type, severity in pairs.all():
-            severities.setdefault(fault_type, []).append(severity)
+            severities.setdefault(
+                fault_type,
+                []
+            ).append(severity)
 
+        # ----------------------------------------------------
+        # Build mission-specific fault summary
+        # ----------------------------------------------------
 
-        faults = [
-            {
-                "fault_type": fault_type,
-                "count": count,
-                "first_seen": first_seen,
-                "last_seen": last_seen,
-                "severities": severities.get(fault_type, [])
-            }
-            for fault_type, count, first_seen, last_seen in rows
-        ]
+        faults = []
 
-        faults.sort(key=lambda fault: fault["count"], reverse=True)
+        for (
+            fault_type,
+            count,
+            first_seen,
+            last_seen
+        ) in rows:
+
+            # Find the latest event for this fault type
+            latest_query = (
+                db.query(FaultEvent)
+                .filter(
+                    FaultEvent.fault_type == fault_type
+                )
+            )
+
+            if engine_id:
+                latest_query = latest_query.filter(
+                    FaultEvent.engine_id == engine_id
+                )
+
+            if start:
+                latest_query = latest_query.filter(
+                    FaultEvent.detected_at >= start
+                )
+
+            if end:
+                latest_query = latest_query.filter(
+                    FaultEvent.detected_at <= end
+                )
+
+            latest_event = (
+                latest_query
+                .order_by(FaultEvent.detected_at.desc())
+                .first()
+            )
+
+            faults.append(
+                {
+                    "fault_type": fault_type,
+                    "count": count,
+                    "first_seen": first_seen,
+                    "last_seen": last_seen,
+                    "severities": severities.get(
+                        fault_type,
+                        []
+                    ),
+                    "latest_rul_seconds": (
+                        latest_event.estimated_rul_seconds
+                        if latest_event
+                        else None
+                    ),
+                }
+            )
+
+        # ----------------------------------------------------
+        # Most frequently detected fault first
+        # ----------------------------------------------------
+
+        faults.sort(
+            key=lambda fault: fault["count"],
+            reverse=True
+        )
 
         return {
-            "total_faults": sum(fault["count"] for fault in faults),
+            "total_faults": sum(
+                fault["count"]
+                for fault in faults
+            ),
             "fault_types": len(faults),
-            "faults": faults
+            "faults": faults,
         }
 
     except Exception as e:
@@ -431,7 +530,6 @@ def get_fault_summary(engine_id: Optional[str] = None):
         }
 
     finally:
-
         db.close()
 
 # ============================================================
