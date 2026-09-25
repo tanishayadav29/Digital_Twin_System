@@ -3,6 +3,8 @@ import { API_BASE } from '../config/app.js'
 import { ENGINE_PARTS } from '../config/engineParts.js'
 import { SEVERITY_META, faultTitle } from '../config/faults.js'
 import { ALIASES, INTERVAL_ORDER, adviceFor } from '../config/maintenance.js'
+import { generateAdvisory } from '../lib/advisory.js'
+import { healthFor } from '../lib/health.js'
 import { formatClock } from '../lib/format.js'
 import './MaintenanceAdvisory.css'
 
@@ -61,13 +63,14 @@ function useFaultSummary() {
 const worse = (a, b) => ((SEVERITY_RANK[b] ?? 0) > (SEVERITY_RANK[a] ?? 0) ? b : a)
 
 // Merges this session's alerts with the recorded fault events into one advisory per fault
-function buildAdvisories(items, recorded, actioned) {
+function buildAdvisories(items, recorded, actioned, health, rulSeconds) {
   const byType = new Map()
 
-  // v1 and v2 have different names for the same fault (LOW_OIL_PRESSURE /
-  // LUBRICATION_ISSUE), so both land in one advisory
+  // v1 and v2 have different names for the same fault
+  // (LOW_OIL_PRESSURE / LUBRICATION_ISSUE), so both land in one advisory
   const entry = (reported) => {
     const type = ALIASES[reported] ?? reported
+
     if (!byType.has(type)) {
       byType.set(type, {
         type,
@@ -78,51 +81,145 @@ function buildAdvisories(items, recorded, actioned) {
         severity: null,
         active: false,
         onlyTest: true,
+        rulSeconds: null,
       })
     }
+
     const it = byType.get(type)
     it.names.add(reported)
+
     return it
   }
 
   for (const alert of items) {
     const it = entry(alert.fault_type)
     const last = parseTime(alert.lastTimestamp ?? alert.timestamp)
+
     it.sessionCount += alert.count ?? 1
     it.lastSeen = Math.max(it.lastSeen, last)
     it.severity = worse(it.severity, alert.severity)
-    if (!alert.acknowledged && Date.now() - last < ACTIVE_WINDOW_MS) it.active = true
-    if (alert.source !== 'manual') it.onlyTest = false
-  }
 
+    if (!alert.acknowledged && Date.now() - last < ACTIVE_WINDOW_MS) {
+      it.active = true
+    }
+
+    if (alert.source !== 'manual') {
+      it.onlyTest = false
+    }
+  }
   for (const fault of recorded) {
     const it = entry(fault.fault_type)
+
     it.recordedCount += fault.count ?? 0
-    it.lastSeen = Math.max(it.lastSeen, parseTime(fault.last_seen))
+
+    it.lastSeen = Math.max(
+      it.lastSeen,
+      parseTime(fault.last_seen),
+    )
+
     it.onlyTest = false
-    for (const severity of fault.severities ?? []) it.severity = worse(it.severity, severity)
+
+    // Keep the RUL calculated when this fault was detected.
+    if (
+      typeof fault.latest_rul_seconds === 'number' &&
+      Number.isFinite(fault.latest_rul_seconds)
+    ) {
+      it.rulSeconds = fault.latest_rul_seconds
+    }
+
+    for (const severity of fault.severities ?? []) {
+      it.severity = worse(
+        it.severity,
+        severity,
+      )
+    }
   }
 
   return [...byType.values()]
     .map((it) => {
       const actionedAt = parseTime(actioned[it.type])
+
+      // Find affected engine parts
+      const affectedParts = ENGINE_PARTS.filter((part) =>
+        part.faults.some((name) => it.names.has(name)),
+      )
+
+      const parts = affectedParts.map(
+        (part) => part.short ?? part.label,
+      )
+
+      // Find the lowest health among the affected parts
+      const affectedHealth = affectedParts
+        .map((part) => health?.[part.id]?.health)
+        .filter((value) => typeof value === 'number')
+
+      const lowestHealth = affectedHealth.length
+        ? Math.min(...affectedHealth)
+        : null
+
+      // Total occurrences
+      const occurrences = Math.max(
+        it.recordedCount,
+        it.sessionCount,
+      )
+
+      // Generate predictive advisory using:
+      // fault severity + affected component health + RUL
+      const predictive = generateAdvisory({
+        faultType: it.type,
+        severity: it.severity,
+        health: lowestHealth,
+
+        // Prefer RUL stored with the historical fault.
+        // Fall back to current live RUL if this is a new active fault.
+        rulSeconds: it.rulSeconds ?? rulSeconds,
+
+        occurrences,
+        affectedParts: parts,
+        active: it.active,
+      })
+
       return {
         ...it,
+
+        // Existing maintenance advice
         advice: adviceFor(it.type),
-        // a part counts as affected if it lists any of the names this fault was logged under
-        parts: ENGINE_PARTS.filter((part) => part.faults.some((name) => it.names.has(name))).map(
-          (part) => part.short ?? part.label,
+
+        // New predictive maintenance information
+        predictive,
+
+        // Affected engine parts
+        parts,
+
+        // Other names used for the same fault
+        alsoKnownAs: [...it.names].filter(
+          (name) => name !== it.type,
         ),
-        alsoKnownAs: [...it.names].filter((name) => name !== it.type),
-        occurrences: Math.max(it.recordedCount, it.sessionCount),
+
+        // Number of occurrences
+        occurrences,
+
+        // Whether the advisory has been actioned
         done: actionedAt > 0 && actionedAt >= it.lastSeen,
       }
     })
     .sort((a, b) => {
-      if (a.done !== b.done) return a.done ? 1 : -1
-      if (a.active !== b.active) return a.active ? -1 : 1
-      const severity = (SEVERITY_RANK[b.severity] ?? 0) - (SEVERITY_RANK[a.severity] ?? 0)
-      if (severity) return severity
+      if (a.done !== b.done) {
+        return a.done ? 1 : -1
+      }
+
+      if (a.active !== b.active) {
+        return a.active ? -1 : 1
+      }
+
+      const severity =
+        (SEVERITY_RANK[b.severity] ?? 0) -
+        (SEVERITY_RANK[a.severity] ?? 0)
+
+      if (severity) {
+        return severity
+      }
+
       return b.occurrences - a.occurrences
     })
 }
@@ -198,10 +295,43 @@ function Advisory({ advisory, open, onOpen, onDone }) {
       )}
 
       <p className="advice__meta">
-        Seen {advisory.occurrences}×
-        {advisory.lastSeen > 0 && <> · last {formatClock(advisory.lastSeen)}</>}
-        {advisory.parts.length > 0 && <> · {advisory.parts.join(', ')}</>}
+        Seen {advisory.occurrences}??
+        {advisory.lastSeen > 0 && <> ?? last {formatClock(advisory.lastSeen)}</>}
+        {advisory.parts.length > 0 && <> ?? {advisory.parts.join(', ')}</>}
       </p>
+
+      {advisory.predictive && (
+        <div className="advice__predictive">
+          <div className="advice__predictive-title">
+            Predictive assessment
+          </div>
+
+          <div className="advice__predictive-grid">
+            <div>
+              <span>Priority</span>
+              <strong>{advisory.predictive.severity}</strong>
+            </div>
+
+            <div>
+              <span>Health</span>
+              <strong>
+                {advisory.predictive.health != null
+                  ? `${advisory.predictive.health}%`
+                  : 'N/A'}
+              </strong>
+            </div>
+
+            <div>
+              <span>RUL</span>
+              <strong>
+                {advisory.predictive.rulSeconds != null
+                  ? `${advisory.predictive.rulSeconds.toFixed(1)} s`
+                  : 'N/A'}
+              </strong>
+            </div>
+          </div>
+        </div>
+      )}
 
       {open && (
         <div className="advice__steps">
@@ -228,15 +358,40 @@ function Advisory({ advisory, open, onOpen, onDone }) {
   )
 }
 
-export function MaintenanceAdvisory({ alerts }) {
+export function MaintenanceAdvisory({ telemetry, stale, alerts }) {
+  const latest = telemetry?.latest
+
+  const health = healthFor({
+    latest,
+    stale,
+    alerts: alerts.items,
+  })
+
+  const rulSeconds =
+    typeof latest?.fault?.rul?.seconds === 'number'
+      ? latest.fault.rul.seconds
+      : null
   const summary = useFaultSummary()
   const [actioned, setActioned] = useState(loadActioned)
   const [openTypes, setOpenTypes] = useState(null)
   const [showSchedule, setShowSchedule] = useState(false)
 
   const advisories = useMemo(
-    () => buildAdvisories(alerts.items, summary.faults, actioned),
-    [alerts.items, summary.faults, actioned],
+    () =>
+      buildAdvisories(
+        alerts.items,
+        summary.faults,
+        actioned,
+        health,
+        rulSeconds,
+      ),
+    [
+      alerts.items,
+      summary.faults,
+      actioned,
+      health,
+      rulSeconds,
+    ],
   )
 
   const schedule = useMemo(() => buildSchedule(advisories), [advisories])

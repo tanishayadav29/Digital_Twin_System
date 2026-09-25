@@ -105,7 +105,7 @@ def simulate_flight(cumulative_wear, seed, life_multiplier=1.0, fault_proneness=
     sim = EngineSimulator(
         profile="mission",
         faults_enabled=has_fault,
-        fault_after=rng.uniform(0.15, 0.7) * duration,
+        fault_after=int(rng.uniform(0.15, 0.7) * duration),
         seed=seed,
         cumulative_wear=cumulative_wear,
     )

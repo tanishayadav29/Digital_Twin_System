@@ -144,7 +144,13 @@ export default function App() {
         {tab === 'flight' && (
           <FlightReplay telemetry={telemetry} stale={stale} source={source} replay={replayed.replay} />
         )}
-        {tab === 'maintenance' && <MaintenanceAdvisory alerts={alerts} />}
+        {tab === 'maintenance' && (
+          <MaintenanceAdvisory
+            telemetry={telemetry}
+            stale={stale}
+            alerts={alerts}
+          />
+        )}
       </main>
 
       <AlertToast
