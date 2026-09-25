@@ -366,3 +366,11 @@
 .advice__predictive-grid strong {
   font-size: 14px;
 }
+
+.maint__health-report {
+  margin-top: 40px;
+}
+
+.maint__health-report .mission-report {
+  margin-top: 0;
+}
