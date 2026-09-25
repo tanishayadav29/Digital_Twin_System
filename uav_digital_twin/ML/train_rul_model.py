@@ -140,7 +140,9 @@ def detector_outputs(bundle, data):
     has_rule = np.array([f is not None for f in rule_fault])
     anomaly = has_rule | model_anomaly
     fault_type = np.where(has_rule, rule_fault, np.where(model_anomaly, "UNKNOWN_ANOMALY", None))
-    deviation = np.round(features, DEVIATION_DECIMALS)
+    # Live detector reports `deviation` for the RESIDUAL_SENSORS only (first
+    # columns); extra columns such as the physics residual are not part of it
+    deviation = np.round(features[:, :len(RESIDUAL_SENSORS)], DEVIATION_DECIMALS)
 
     return anomaly, fault_type, deviation
 

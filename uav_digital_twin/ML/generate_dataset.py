@@ -89,7 +89,7 @@ def generate(name, parts, scale, data_dir):
 
                 for _ in range(int(part["hours"] * 3600 * scale)):
 
-                    reading, truth = sim.step(1.0)
+                    reading, truth = sim.step(1.0)[:2]
 
                     if truth["fault"] and truth["fault"] != last_fault:
                         episodes += 1

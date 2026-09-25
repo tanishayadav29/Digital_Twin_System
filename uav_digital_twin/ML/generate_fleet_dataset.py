@@ -122,7 +122,7 @@ def simulate_flight(cumulative_wear, seed, life_multiplier=1.0, fault_proneness=
 
     for _ in range(steps):
 
-        reading, truth = sim.step(SIM_DT)
+        reading, truth = sim.step(SIM_DT)[:2]      # step() also returns physics info - not needed here
 
         if truth["fault"] and not in_fault:
             faults += 1
