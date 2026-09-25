@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { API_BASE } from '../config/app.js'
+import { MissionHealthReport } from '../components/MissionHealthReport.jsx'
 import { ENGINE_PARTS } from '../config/engineParts.js'
 import { SEVERITY_META, faultTitle } from '../config/faults.js'
 import { ALIASES, INTERVAL_ORDER, adviceFor } from '../config/maintenance.js'
@@ -9,48 +10,108 @@ import { formatClock } from '../lib/format.js'
 import './MaintenanceAdvisory.css'
 
 const STORE_KEY = 'uav-dt:maintenance-actioned'
-const SEVERITY_RANK = { MEDIUM: 1, HIGH: 2, CRITICAL: 3 }
+const SEVERITY_RANK = {
+  MEDIUM: 1,
+  HIGH: 2,
+  CRITICAL: 3,
+}
+
 const REFRESH_MS = 30_000
+
 // An alert seen within this long still counts as happening now
 const ACTIVE_WINDOW_MS = 120_000
+
+// ============================================================
+// TIME PARSER
+// ============================================================
 
 // Postgres can hand timestamps back without a zone; treat those as UTC
 function parseTime(timestamp) {
   if (!timestamp) return 0
+
   const text = String(timestamp)
-  const value = Date.parse(/(?:[zZ]|[+-]\d\d:?\d\d)$/.test(text) ? text : `${text}Z`)
+
+  const value = Date.parse(
+    /(?:[zZ]|[+-]\d\d:?\d\d)$/.test(text)
+      ? text
+      : `${text}Z`,
+  )
+
   return Number.isFinite(value) ? value : 0
 }
 
+// ============================================================
+// ACTIONED STATE
+// ============================================================
+
 function loadActioned() {
   try {
-    return JSON.parse(localStorage.getItem(STORE_KEY)) ?? {}
+    return JSON.parse(
+      localStorage.getItem(STORE_KEY),
+    ) ?? {}
   } catch {
     return {}
   }
 }
 
-// Recorded fault events from the database, so advice survives a page reload
+// ============================================================
+// RECORDED FAULT SUMMARY
+// ============================================================
+
+// Recorded fault events from the database,
+// so advice survives a page reload.
 function useFaultSummary() {
-  const [state, setState] = useState({ faults: [], total: 0, status: 'loading' })
+  const [state, setState] = useState({
+    faults: [],
+    total: 0,
+    status: 'loading',
+  })
 
   useEffect(() => {
     let cancelled = false
 
     const load = async () => {
       try {
-        const res = await fetch(`${API_BASE}/fault-summary`)
+        const res = await fetch(
+          `${API_BASE}/fault-summary`,
+        )
+
         const body = await res.json()
-        if (cancelled) return
-        if (!res.ok || body.error || !Array.isArray(body.faults)) throw new Error('bad response')
-        setState({ faults: body.faults, total: body.total_faults ?? 0, status: 'ok' })
+
+        if (cancelled) {
+          return
+        }
+
+        if (
+          !res.ok ||
+          body.error ||
+          !Array.isArray(body.faults)
+        ) {
+          throw new Error('bad response')
+        }
+
+        setState({
+          faults: body.faults,
+          total: body.total_faults ?? 0,
+          status: 'ok',
+        })
       } catch {
-        if (!cancelled) setState((prev) => ({ ...prev, status: 'offline' }))
+        if (!cancelled) {
+          setState((prev) => ({
+            ...prev,
+            status: 'offline',
+          }))
+        }
       }
     }
 
     load()
-    const timer = setInterval(load, REFRESH_MS)
+
+    const timer = setInterval(
+      load,
+      REFRESH_MS,
+    )
+
     return () => {
       cancelled = true
       clearInterval(timer)
@@ -60,16 +121,39 @@ function useFaultSummary() {
   return state
 }
 
-const worse = (a, b) => ((SEVERITY_RANK[b] ?? 0) > (SEVERITY_RANK[a] ?? 0) ? b : a)
+// ============================================================
+// SEVERITY HELPER
+// ============================================================
 
-// Merges this session's alerts with the recorded fault events into one advisory per fault
-function buildAdvisories(items, recorded, actioned, health, rulSeconds) {
+const worse = (a, b) =>
+  (
+    (SEVERITY_RANK[b] ?? 0) >
+    (SEVERITY_RANK[a] ?? 0)
+      ? b
+      : a
+  )
+
+// ============================================================
+// BUILD MAINTENANCE ADVISORIES
+// ============================================================
+
+// Merges this session's alerts with the recorded
+// fault events into one advisory per fault.
+function buildAdvisories(
+  items,
+  recorded,
+  actioned,
+  health,
+  rulSeconds,
+) {
   const byType = new Map()
 
   // v1 and v2 have different names for the same fault
-  // (LOW_OIL_PRESSURE / LUBRICATION_ISSUE), so both land in one advisory
+  // (LOW_OIL_PRESSURE / LUBRICATION_ISSUE),
+  // so both land in one advisory.
   const entry = (reported) => {
-    const type = ALIASES[reported] ?? reported
+    const type =
+      ALIASES[reported] ?? reported
 
     if (!byType.has(type)) {
       byType.set(type, {
@@ -86,20 +170,40 @@ function buildAdvisories(items, recorded, actioned, health, rulSeconds) {
     }
 
     const it = byType.get(type)
+
     it.names.add(reported)
 
     return it
   }
 
+  // ----------------------------------------------------------
+  // SESSION ALERTS
+  // ----------------------------------------------------------
+
   for (const alert of items) {
     const it = entry(alert.fault_type)
-    const last = parseTime(alert.lastTimestamp ?? alert.timestamp)
+
+    const last = parseTime(
+      alert.lastTimestamp ??
+      alert.timestamp,
+    )
 
     it.sessionCount += alert.count ?? 1
-    it.lastSeen = Math.max(it.lastSeen, last)
-    it.severity = worse(it.severity, alert.severity)
 
-    if (!alert.acknowledged && Date.now() - last < ACTIVE_WINDOW_MS) {
+    it.lastSeen = Math.max(
+      it.lastSeen,
+      last,
+    )
+
+    it.severity = worse(
+      it.severity,
+      alert.severity,
+    )
+
+    if (
+      !alert.acknowledged &&
+      Date.now() - last < ACTIVE_WINDOW_MS
+    ) {
       it.active = true
     }
 
@@ -107,10 +211,16 @@ function buildAdvisories(items, recorded, actioned, health, rulSeconds) {
       it.onlyTest = false
     }
   }
+
+  // ----------------------------------------------------------
+  // RECORDED DATABASE FAULTS
+  // ----------------------------------------------------------
+
   for (const fault of recorded) {
     const it = entry(fault.fault_type)
 
-    it.recordedCount += fault.count ?? 0
+    it.recordedCount +=
+      fault.count ?? 0
 
     it.lastSeen = Math.max(
       it.lastSeen,
@@ -121,13 +231,20 @@ function buildAdvisories(items, recorded, actioned, health, rulSeconds) {
 
     // Keep the RUL calculated when this fault was detected.
     if (
-      typeof fault.latest_rul_seconds === 'number' &&
-      Number.isFinite(fault.latest_rul_seconds)
+      typeof fault.latest_rul_seconds ===
+        'number' &&
+      Number.isFinite(
+        fault.latest_rul_seconds,
+      )
     ) {
-      it.rulSeconds = fault.latest_rul_seconds
+      it.rulSeconds =
+        fault.latest_rul_seconds
     }
 
-    for (const severity of fault.severities ?? []) {
+    for (
+      const severity of
+      fault.severities ?? []
+    ) {
       it.severity = worse(
         it.severity,
         severity,
@@ -135,27 +252,45 @@ function buildAdvisories(items, recorded, actioned, health, rulSeconds) {
     }
   }
 
+  // ----------------------------------------------------------
+  // CONVERT TO ADVISORY OBJECTS
+  // ----------------------------------------------------------
+
   return [...byType.values()]
     .map((it) => {
-      const actionedAt = parseTime(actioned[it.type])
+      const actionedAt = parseTime(
+        actioned[it.type],
+      )
 
       // Find affected engine parts
-      const affectedParts = ENGINE_PARTS.filter((part) =>
-        part.faults.some((name) => it.names.has(name)),
-      )
+      const affectedParts =
+        ENGINE_PARTS.filter((part) =>
+          part.faults.some((name) =>
+            it.names.has(name),
+          ),
+        )
 
       const parts = affectedParts.map(
-        (part) => part.short ?? part.label,
+        (part) =>
+          part.short ?? part.label,
       )
 
-      // Find the lowest health among the affected parts
-      const affectedHealth = affectedParts
-        .map((part) => health?.[part.id]?.health)
-        .filter((value) => typeof value === 'number')
+      // Find the lowest health among affected parts
+      const affectedHealth =
+        affectedParts
+          .map(
+            (part) =>
+              health?.[part.id]?.health,
+          )
+          .filter(
+            (value) =>
+              typeof value === 'number',
+          )
 
-      const lowestHealth = affectedHealth.length
-        ? Math.min(...affectedHealth)
-        : null
+      const lowestHealth =
+        affectedHealth.length
+          ? Math.min(...affectedHealth)
+          : null
 
       // Total occurrences
       const occurrences = Math.max(
@@ -165,19 +300,23 @@ function buildAdvisories(items, recorded, actioned, health, rulSeconds) {
 
       // Generate predictive advisory using:
       // fault severity + affected component health + RUL
-      const predictive = generateAdvisory({
-        faultType: it.type,
-        severity: it.severity,
-        health: lowestHealth,
+      const predictive =
+        generateAdvisory({
+          faultType: it.type,
+          severity: it.severity,
+          health: lowestHealth,
 
-        // Prefer RUL stored with the historical fault.
-        // Fall back to current live RUL if this is a new active fault.
-        rulSeconds: it.rulSeconds ?? rulSeconds,
+          // Prefer RUL stored with the historical fault.
+          // Fall back to current live RUL if this is
+          // a new active fault.
+          rulSeconds:
+            it.rulSeconds ??
+            rulSeconds,
 
-        occurrences,
-        affectedParts: parts,
-        active: it.active,
-      })
+          occurrences,
+          affectedParts: parts,
+          active: it.active,
+        })
 
       return {
         ...it,
@@ -192,15 +331,20 @@ function buildAdvisories(items, recorded, actioned, health, rulSeconds) {
         parts,
 
         // Other names used for the same fault
-        alsoKnownAs: [...it.names].filter(
-          (name) => name !== it.type,
+        alsoKnownAs: [
+          ...it.names,
+        ].filter(
+          (name) =>
+            name !== it.type,
         ),
 
         // Number of occurrences
         occurrences,
 
         // Whether the advisory has been actioned
-        done: actionedAt > 0 && actionedAt >= it.lastSeen,
+        done:
+          actionedAt > 0 &&
+          actionedAt >= it.lastSeen,
       }
     })
     .sort((a, b) => {
@@ -220,46 +364,112 @@ function buildAdvisories(items, recorded, actioned, health, rulSeconds) {
         return severity
       }
 
-      return b.occurrences - a.occurrences
+      return (
+        b.occurrences -
+        a.occurrences
+      )
     })
 }
 
-// Every preventive task from the advisories on screen, grouped by how often it is due
+// ============================================================
+// PREVENTIVE SCHEDULE
+// ============================================================
+
+// Every preventive task from the advisories
+// on screen, grouped by how often it is due.
 function buildSchedule(advisories) {
   const byInterval = new Map()
 
   for (const advisory of advisories) {
-    for (const task of advisory.advice.prevent) {
-      if (!byInterval.has(task.every)) byInterval.set(task.every, new Map())
-      const tasks = byInterval.get(task.every)
-      if (!tasks.has(task.do)) tasks.set(task.do, [])
-      tasks.get(task.do).push(faultTitle(advisory.type))
+    for (
+      const task of
+      advisory.advice.prevent
+    ) {
+      if (
+        !byInterval.has(task.every)
+      ) {
+        byInterval.set(
+          task.every,
+          new Map(),
+        )
+      }
+
+      const tasks =
+        byInterval.get(
+          task.every,
+        )
+
+      if (!tasks.has(task.do)) {
+        tasks.set(task.do, [])
+      }
+
+      tasks
+        .get(task.do)
+        .push(
+          faultTitle(
+            advisory.type,
+          ),
+        )
     }
   }
 
   return [...byInterval.entries()]
-    .sort((a, b) => INTERVAL_ORDER.indexOf(a[0]) - INTERVAL_ORDER.indexOf(b[0]))
-    .map(([every, tasks]) => ({
-      every,
-      tasks: [...tasks.entries()].map(([task, faults]) => ({ task, faults })),
-    }))
+    .sort(
+      (a, b) =>
+        INTERVAL_ORDER.indexOf(a[0]) -
+        INTERVAL_ORDER.indexOf(b[0]),
+    )
+    .map(
+      ([every, tasks]) => ({
+        every,
+        tasks: [
+          ...tasks.entries(),
+        ].map(
+          ([task, faults]) => ({
+            task,
+            faults,
+          }),
+        ),
+      }),
+    )
 }
 
-function Step({ number, title, when, items }) {
+// ============================================================
+// MAINTENANCE STEP COMPONENT
+// ============================================================
+
+function Step({
+  number,
+  title,
+  when,
+  items,
+}) {
   return (
     <section className="step">
       <h4 className="step__title">
-        <span className="step__number">{number}</span>
+        <span className="step__number">
+          {number}
+        </span>
+
         {title}
-        <span className="step__when">{when}</span>
+
+        <span className="step__when">
+          {when}
+        </span>
       </h4>
+
       <ul className="step__list">
         {items.map((item) =>
           typeof item === 'string' ? (
-            <li key={item}>{item}</li>
+            <li key={item}>
+              {item}
+            </li>
           ) : (
             <li key={item.do}>
-              <span className="step__every">{item.every}</span>
+              <span className="step__every">
+                {item.every}
+              </span>
+
               {item.do}
             </li>
           ),
@@ -269,35 +479,100 @@ function Step({ number, title, when, items }) {
   )
 }
 
-function Advisory({ advisory, open, onOpen, onDone }) {
-  const severity = SEVERITY_META[advisory.severity] ?? SEVERITY_META.HIGH
+// ============================================================
+// ADVISORY CARD
+// ============================================================
+
+function Advisory({
+  advisory,
+  open,
+  onOpen,
+  onDone,
+}) {
+  const severity =
+    SEVERITY_META[
+      advisory.severity
+    ] ??
+    SEVERITY_META.HIGH
+
   const { advice } = advisory
 
   return (
     <article
-      className={`advice advice--${severity.tone}${advisory.done ? ' is-done' : ''}${open ? ' is-open' : ''}`}
+      className={`advice advice--${severity.tone}${
+        advisory.done
+          ? ' is-done'
+          : ''
+      }${
+        open
+          ? ' is-open'
+          : ''
+      }`}
     >
       <header className="advice__head">
-        <h3 className="advice__name">{faultTitle(advisory.type)}</h3>
-        <span className="advice__sev">{severity.label}</span>
-        {advisory.active && <span className="advice__tag advice__tag--now">Happening now</span>}
-        {advisory.done && <span className="advice__tag">Actioned</span>}
-        {advisory.onlyTest && <span className="advice__tag">Test trigger</span>}
+        <h3 className="advice__name">
+          {faultTitle(
+            advisory.type,
+          )}
+        </h3>
+
+        <span className="advice__sev">
+          {severity.label}
+        </span>
+
+        {advisory.active && (
+          <span className="advice__tag advice__tag--now">
+            Happening now
+          </span>
+        )}
+
+        {advisory.done && (
+          <span className="advice__tag">
+            Actioned
+          </span>
+        )}
+
+        {advisory.onlyTest && (
+          <span className="advice__tag">
+            Test trigger
+          </span>
+        )}
       </header>
 
-      <p className="advice__summary">{advice.summary}</p>
+      <p className="advice__summary">
+        {advice.summary}
+      </p>
 
       {!open && (
         <p className="advice__first">
-          <span className="advice__first-label">Do first</span>
+          <span className="advice__first-label">
+            Do first
+          </span>
+
           {advice.now[0]}
         </p>
       )}
 
       <p className="advice__meta">
-        Seen {advisory.occurrences}??
-        {advisory.lastSeen > 0 && <> ?? last {formatClock(advisory.lastSeen)}</>}
-        {advisory.parts.length > 0 && <> ?? {advisory.parts.join(', ')}</>}
+        Seen {advisory.occurrences}
+        {advisory.lastSeen > 0 && (
+          <>
+            {' '}· last{' '}
+            {formatClock(
+              advisory.lastSeen,
+            )}
+          </>
+        )}
+
+        {advisory.parts.length >
+          0 && (
+          <>
+            {' '}·{' '}
+            {advisory.parts.join(
+              ', ',
+            )}
+          </>
+        )}
       </p>
 
       {advisory.predictive && (
@@ -308,23 +583,40 @@ function Advisory({ advisory, open, onOpen, onDone }) {
 
           <div className="advice__predictive-grid">
             <div>
-              <span>Priority</span>
-              <strong>{advisory.predictive.severity}</strong>
+              <span>
+                Priority
+              </span>
+
+              <strong>
+                {
+                  advisory
+                    .predictive
+                    .severity
+                }
+              </strong>
             </div>
 
             <div>
-              <span>Health</span>
+              <span>
+                Health
+              </span>
+
               <strong>
-                {advisory.predictive.health != null
+                {advisory.predictive
+                  .health != null
                   ? `${advisory.predictive.health}%`
                   : 'N/A'}
               </strong>
             </div>
 
             <div>
-              <span>RUL</span>
+              <span>
+                RUL
+              </span>
+
               <strong>
-                {advisory.predictive.rulSeconds != null
+                {advisory.predictive
+                  .rulSeconds != null
                   ? `${advisory.predictive.rulSeconds.toFixed(1)} s`
                   : 'N/A'}
               </strong>
@@ -335,31 +627,90 @@ function Advisory({ advisory, open, onOpen, onDone }) {
 
       {open && (
         <div className="advice__steps">
-          <Step number="1" title="In the air" when="while it is happening" items={advice.now} />
-          <Step number="2" title="On the ground" when="check and repair" items={advice.inspect} />
-          <Step number="3" title="Later" when="so it does not come back" items={advice.prevent} />
+          <Step
+            number="1"
+            title="In the air"
+            when="while it is happening"
+            items={advice.now}
+          />
+
+          <Step
+            number="2"
+            title="On the ground"
+            when="check and repair"
+            items={advice.inspect}
+          />
+
+          <Step
+            number="3"
+            title="Later"
+            when="so it does not come back"
+            items={advice.prevent}
+          />
         </div>
       )}
 
       <div className="advice__actions">
-        <button type="button" className="btn btn--sm" onClick={() => onOpen(advisory.type)}>
-          {open ? 'Hide steps' : 'Show steps'}
+        <button
+          type="button"
+          className="btn btn--sm"
+          onClick={() =>
+            onOpen(advisory.type)
+          }
+        >
+          {open
+            ? 'Hide steps'
+            : 'Show steps'}
         </button>
-        <button type="button" className="btn btn--sm btn--ghost" onClick={() => onDone(advisory)}>
-          {advisory.done ? 'Reopen' : 'Mark actioned'}
+
+        <button
+          type="button"
+          className="btn btn--sm btn--ghost"
+          onClick={() =>
+            onDone(advisory)
+          }
+        >
+          {advisory.done
+            ? 'Reopen'
+            : 'Mark actioned'}
         </button>
-        {open && advisory.alsoKnownAs.length > 0 && (
-          <span className="advice__alias">
-            also logged as {advisory.alsoKnownAs.map((name) => faultTitle(name)).join(', ')}
-          </span>
-        )}
+
+        {open &&
+          advisory.alsoKnownAs
+            .length > 0 && (
+            <span className="advice__alias">
+              also logged as{' '}
+              {advisory.alsoKnownAs
+                .map((name) =>
+                  faultTitle(name),
+                )
+                .join(', ')}
+            </span>
+          )}
       </div>
     </article>
   )
 }
 
-export function MaintenanceAdvisory({ telemetry, stale, alerts }) {
-  const latest = telemetry?.latest
+// ============================================================
+// MAIN MAINTENANCE ADVISORY COMPONENT
+// ============================================================
+
+export function MaintenanceAdvisory({
+  telemetry,
+  stale,
+  alerts,
+}) {
+  // ----------------------------------------------------------
+  // CURRENT LIVE READING
+  // ----------------------------------------------------------
+
+  const latest =
+    telemetry?.latest
+
+  // ----------------------------------------------------------
+  // CURRENT ENGINE HEALTH
+  // ----------------------------------------------------------
 
   const health = healthFor({
     latest,
@@ -367,14 +718,173 @@ export function MaintenanceAdvisory({ telemetry, stale, alerts }) {
     alerts: alerts.items,
   })
 
+  // ----------------------------------------------------------
+  // CURRENT LIVE RUL
+  // ----------------------------------------------------------
+
   const rulSeconds =
-    typeof latest?.fault?.rul?.seconds === 'number'
+    typeof latest?.fault?.rul
+      ?.seconds === 'number'
       ? latest.fault.rul.seconds
       : null
-  const summary = useFaultSummary()
-  const [actioned, setActioned] = useState(loadActioned)
-  const [openTypes, setOpenTypes] = useState(null)
-  const [showSchedule, setShowSchedule] = useState(false)
+
+  // ----------------------------------------------------------
+  // DATABASE FAULT SUMMARY
+  // ----------------------------------------------------------
+
+  const summary =
+    useFaultSummary()
+
+  // ----------------------------------------------------------
+  // LOCAL UI STATE
+  // ----------------------------------------------------------
+
+  const [
+    actioned,
+    setActioned,
+  ] = useState(
+    loadActioned,
+  )
+
+  const [
+    openTypes,
+    setOpenTypes,
+  ] = useState(null)
+
+  const [
+    showSchedule,
+    setShowSchedule,
+  ] = useState(false)
+
+  // ----------------------------------------------------------
+  // MISSION HEALTH REPORT READINGS
+  // ----------------------------------------------------------
+
+  const [
+    reportReadings,
+    setReportReadings,
+  ] = useState([])
+
+  // ----------------------------------------------------------
+  // LOAD TELEMETRY FOR HEALTH REPORT
+  // ----------------------------------------------------------
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadReportReadings() {
+      try {
+        const response =
+          await fetch(
+            `${API_BASE}/sensor-history?limit=500`,
+          )
+
+        if (!response.ok) {
+          throw new Error(
+            `Failed to load report telemetry: ${response.status}`,
+          )
+        }
+
+        const data =
+          await response.json()
+
+        if (cancelled) {
+          return
+        }
+
+        const rows =
+          Array.isArray(
+            data.readings,
+          )
+            ? data.readings
+            : []
+
+        // Convert backend sensor rows into
+        // MissionHealthReport's expected format.
+        const normalized =
+          rows
+            .map((reading) => ({
+              time: Date.parse(
+                reading.timestamp,
+              ),
+
+              engineId:
+                reading.engine_id,
+
+              values: {
+                rpm: reading.rpm,
+                cht: reading.cht,
+                egt: reading.egt,
+                oil_pressure:
+                  reading.oil_pressure,
+                oil_temperature:
+                  reading.oil_temperature,
+                fuel_flow:
+                  reading.fuel_flow,
+                vibration:
+                  reading.vibration,
+                battery_voltage:
+                  reading.battery_voltage,
+                alternator_current:
+                  reading.alternator_current,
+                injection_timing:
+                  reading.injection_timing,
+              },
+
+              fault: {},
+            }))
+
+            // Remove invalid timestamps.
+            .filter(
+              (reading) =>
+                Number.isFinite(
+                  reading.time,
+                ),
+            )
+
+            // IMPORTANT:
+            // /sensor-history?limit=500 returns
+            // newest -> oldest.
+            //
+            // MissionHealthReport expects:
+            // oldest -> newest.
+            //
+            // Without this sort:
+            // readings[0] = newest
+            // readings[last] = oldest
+            //
+            // That makes the fault-analysis
+            // start/end window reversed.
+            .sort(
+              (a, b) =>
+                a.time - b.time,
+            )
+
+        setReportReadings(
+          normalized,
+        )
+      } catch (error) {
+        console.error(
+          'Maintenance report telemetry failed:',
+          error,
+        )
+
+        if (!cancelled) {
+          setReportReadings([])
+        }
+      }
+    }
+
+    loadReportReadings()
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  // ----------------------------------------------------------
+  // BUILD ADVISORIES
+  // ----------------------------------------------------------
 
   const advisories = useMemo(
     () =>
@@ -394,114 +904,319 @@ export function MaintenanceAdvisory({ telemetry, stale, alerts }) {
     ],
   )
 
-  const schedule = useMemo(() => buildSchedule(advisories), [advisories])
-  const taskCount = schedule.reduce((total, group) => total + group.tasks.length, 0)
+  // ----------------------------------------------------------
+  // PREVENTIVE SCHEDULE
+  // ----------------------------------------------------------
 
-  // Until something is clicked, the most urgent advisory is the one left open
-  const isOpen = (type, index) => (openTypes ? openTypes.has(type) : index === 0)
+  const schedule =
+    useMemo(
+      () =>
+        buildSchedule(
+          advisories,
+        ),
+      [advisories],
+    )
 
-  const toggleOpen = useCallback(
-    (type) => {
-      setOpenTypes((prev) => {
-        const next = new Set(prev ?? (advisories[0] ? [advisories[0].type] : []))
-        if (next.has(type)) next.delete(type)
-        else next.add(type)
-        return next
-      })
-    },
-    [advisories],
-  )
+  const taskCount =
+    schedule.reduce(
+      (total, group) =>
+        total +
+        group.tasks.length,
+      0,
+    )
 
-  const toggleDone = useCallback((advisory) => {
-    setActioned((prev) => {
-      const next = { ...prev }
-      if (advisory.done) delete next[advisory.type]
-      else next[advisory.type] = new Date().toISOString()
-      try {
-        localStorage.setItem(STORE_KEY, JSON.stringify(next))
-      } catch {
-        // storage blocked - the choice just won't persist
-      }
-      return next
-    })
-  }, [])
+  // Until something is clicked,
+  // the most urgent advisory is left open.
+  const isOpen = (
+    type,
+    index,
+  ) =>
+    openTypes
+      ? openTypes.has(type)
+      : index === 0
 
-  const open = advisories.filter((a) => !a.done)
-  const urgent = open.filter((a) => a.active || a.severity === 'CRITICAL')
+  // ----------------------------------------------------------
+  // OPEN/CLOSE ADVISORY
+  // ----------------------------------------------------------
+
+  const toggleOpen =
+    useCallback(
+      (type) => {
+        setOpenTypes(
+          (prev) => {
+            const next =
+              new Set(
+                prev ??
+                  (advisories[0]
+                    ? [
+                        advisories[0]
+                          .type,
+                      ]
+                    : []),
+              )
+
+            if (next.has(type)) {
+              next.delete(type)
+            } else {
+              next.add(type)
+            }
+
+            return next
+          },
+        )
+      },
+      [advisories],
+    )
+
+  // ----------------------------------------------------------
+  // MARK ACTIONED
+  // ----------------------------------------------------------
+
+  const toggleDone =
+    useCallback(
+      (advisory) => {
+        setActioned(
+          (prev) => {
+            const next = {
+              ...prev,
+            }
+
+            if (advisory.done) {
+              delete next[
+                advisory.type
+              ]
+            } else {
+              next[
+                advisory.type
+              ] =
+                new Date().toISOString()
+            }
+
+            try {
+              localStorage.setItem(
+                STORE_KEY,
+                JSON.stringify(
+                  next,
+                ),
+              )
+            } catch {
+              // storage blocked -
+              // choice will not persist
+            }
+
+            return next
+          },
+        )
+      },
+      [],
+    )
+
+  // ----------------------------------------------------------
+  // STATUS COUNTS
+  // ----------------------------------------------------------
+
+  const open =
+    advisories.filter(
+      (a) => !a.done,
+    )
+
+  const urgent =
+    open.filter(
+      (a) =>
+        a.active ||
+        a.severity ===
+          'CRITICAL',
+    )
+
+  // ----------------------------------------------------------
+  // RENDER
+  // ----------------------------------------------------------
 
   return (
     <div className="maint">
+      {/* ======================================================
+          MAINTENANCE HEADER
+      ====================================================== */}
+
       <section className="card maint__head">
         <p className="maint__count">
-          <strong>{open.length}</strong> {open.length === 1 ? 'advisory' : 'advisories'} open
+          <strong>
+            {open.length}
+          </strong>{' '}
+          {open.length === 1
+            ? 'advisory'
+            : 'advisories'}{' '}
+          open
+
           {urgent.length > 0 && (
             <>
-              , <strong className="maint__count--alarm">{urgent.length}</strong> needing attention now
+              ,{' '}
+              <strong className="maint__count--alarm">
+                {urgent.length}
+              </strong>{' '}
+              needing attention now
             </>
           )}
         </p>
+
         <p className="maint__source">
-          {summary.status === 'ok'
+          {summary.status ===
+          'ok'
             ? `From ${summary.total} recorded faults and this session's alerts`
-            : summary.status === 'loading'
+            : summary.status ===
+              'loading'
               ? 'Loading recorded faults…'
               : 'Backend offline — this session only'}
         </p>
       </section>
 
-      {advisories.length === 0 ? (
+      {/* ======================================================
+          ADVISORY CARDS
+      ====================================================== */}
+
+      {advisories.length ===
+      0 ? (
         <section className="card maint__empty">
-          <strong>Nothing to advise on yet</strong>
-          <span>Advisories appear here as soon as the detector raises a fault.</span>
+          <strong>
+            Nothing to advise
+            on yet
+          </strong>
+
+          <span>
+            Advisories appear here
+            as soon as the detector
+            raises a fault.
+          </span>
         </section>
       ) : (
         <div className="maint__list">
-          {advisories.map((advisory, index) => (
-            <Advisory
-              key={advisory.type}
-              advisory={advisory}
-              open={isOpen(advisory.type, index)}
-              onOpen={toggleOpen}
-              onDone={toggleDone}
-            />
-          ))}
+          {advisories.map(
+            (
+              advisory,
+              index,
+            ) => (
+              <Advisory
+                key={
+                  advisory.type
+                }
+                advisory={
+                  advisory
+                }
+                open={isOpen(
+                  advisory.type,
+                  index,
+                )}
+                onOpen={
+                  toggleOpen
+                }
+                onDone={
+                  toggleDone
+                }
+              />
+            ),
+          )}
         </div>
       )}
+
+      {/* ======================================================
+          PREVENTIVE SCHEDULE
+      ====================================================== */}
 
       {schedule.length > 0 && (
         <section className="card maint__schedule">
           <button
             type="button"
             className="maint__schedule-toggle"
-            onClick={() => setShowSchedule((value) => !value)}
-            aria-expanded={showSchedule}
+            onClick={() =>
+              setShowSchedule(
+                (value) =>
+                  !value,
+              )
+            }
+            aria-expanded={
+              showSchedule
+            }
           >
-            <span>Preventive schedule</span>
-            <span className="maint__schedule-count">
-              {taskCount} tasks · {schedule.length} intervals
+            <span>
+              Preventive schedule
             </span>
-            <span className="maint__chevron">{showSchedule ? '−' : '+'}</span>
+
+            <span className="maint__schedule-count">
+              {taskCount} tasks ·{' '}
+              {schedule.length}{' '}
+              intervals
+            </span>
+
+            <span className="maint__chevron">
+              {showSchedule
+                ? '−'
+                : '+'}
+            </span>
           </button>
 
           {showSchedule &&
-            schedule.map((group) => (
-              <div key={group.every} className="maint__group">
-                <h3 className="maint__every">{group.every}</h3>
-                <ul className="maint__tasks">
-                  {group.tasks.map(({ task, faults }) => (
-                    <li key={task}>
-                      {task}
-                      <span className="maint__from">{faults.join(', ')}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ))}
+            schedule.map(
+              (group) => (
+                <div
+                  key={
+                    group.every
+                  }
+                  className="maint__group"
+                >
+                  <h3 className="maint__every">
+                    {group.every}
+                  </h3>
+
+                  <ul className="maint__tasks">
+                    {group.tasks.map(
+                      ({
+                        task,
+                        faults,
+                      }) => (
+                        <li
+                          key={
+                            task
+                          }
+                        >
+                          {task}
+
+                          <span className="maint__from">
+                            {faults.join(
+                              ', ',
+                            )}
+                          </span>
+                        </li>
+                      ),
+                    )}
+                  </ul>
+                </div>
+              ),
+            )}
         </section>
       )}
 
+      {/* ======================================================
+          FULL MISSION HEALTH REPORT
+      ====================================================== */}
+
+      <section className="maint__health-report">
+        <MissionHealthReport
+          readings={
+            reportReadings
+          }
+          summary={null}
+        />
+      </section>
+
+      {/* ======================================================
+          DISCLAIMER
+      ====================================================== */}
+
       <p className="maint__note">
-        Generic guidance for a MALE UAV piston engine — where the engine manual differs, follow the manual.
+        Generic guidance for a
+        MALE UAV piston engine —
+        where the engine manual
+        differs, follow the manual.
       </p>
     </div>
   )
