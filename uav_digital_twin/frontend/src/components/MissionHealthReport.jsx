@@ -6,10 +6,54 @@ import {
 
 import { PART_BY_ID } from '../config/engineParts.js'
 import { healthFor, overallHealth, worstPart } from '../lib/health.js'
+import { withZone } from '../lib/readings.js'
 
 import './MissionHealthReport.css'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { API_BASE } from '../config/app.js'
+
+// Decimals per sensor in the telemetry table (vibration is ~0.3 g)
+const SENSOR_DIGITS = {
+  rpm: 0,
+  fuel_flow: 2,
+  vibration: 3,
+  battery_voltage: 2,
+  alternator_current: 2,
+}
+
+// Same as lib/health.js: a fault keeps its parts down this long after it ends
+const FAULT_MEMORY_MS = 60_000
+
+// A fault counts as still happening if it was flagged this close to the last reading
+const ACTIVE_FAULT_MS = 30_000
+
+// ...and the last reading is this recent (a replayed old window is never "active")
+const LIVE_DATA_MS = 120_000
+
+const SEVERITY_RANK = {
+  LOW: 1,
+  MEDIUM: 2,
+  HIGH: 3,
+  CRITICAL: 4,
+}
+
+// Same thresholds lib/health.js uses for a part's status
+const statusOf = (health) => {
+  if (health == null || !Number.isFinite(health)) return 'nodata'
+  if (health >= 0.85) return 'normal'
+  if (health >= 0.6) return 'warning'
+  return 'critical'
+}
+
+const parseTime = (value) => {
+  const time = Date.parse(withZone(value))
+  return Number.isFinite(time) ? time : null
+}
+
+const formatSeconds = (seconds) => {
+  if (seconds == null || !Number.isFinite(seconds)) return 'N/A'
+  return formatDuration(Math.max(seconds, 1) * 1000)
+}
 
 const formatNumber = (value, digits = 1) => {
   if (value == null || !Number.isFinite(value)) {
@@ -54,51 +98,25 @@ const formatFaultName = (faultType = '') =>
     .toLowerCase()
     .replace(/\b\w/g, (char) => char.toUpperCase())
 
-const getFaultSeverity = (fault) => {
-  const severities = fault.severities ?? []
-
-  if (severities.includes('CRITICAL')) {
-    return 'CRITICAL'
-  }
-
-  if (severities.includes('HIGH')) {
-    return 'HIGH'
-  }
-
-  if (severities.includes('MEDIUM')) {
-    return 'MEDIUM'
-  }
-
-  if (severities.includes('LOW')) {
-    return 'LOW'
-  }
-
-  return 'UNKNOWN'
-}
-
 const formatFaultTime = (value) => {
   if (!value) return 'N/A'
 
-  const date = new Date(value)
+  // Backend timestamps are UTC without a zone
+  const date = new Date(withZone(value))
 
   return Number.isNaN(date.getTime())
     ? 'N/A'
     : date.toLocaleString()
 }
 
-const formatRul = (value) => {
-  if (typeof value !== 'number' || !Number.isFinite(value)) {
-    return 'N/A'
-  }
-
-  return `${value.toFixed(1)} s`
-}
-
 export function MissionHealthReport({
   readings = [],
   summary = null,
+  description = 'Historical engine telemetry analysis for the selected replay window.',
 }) {
   const report = missionReadings(readings)
+  // Fault events grouped into episodes by the backend
+  // (one row per fault, not one per flagged second)
   const [faults, setFaults] = useState([])
   const [faultLoading, setFaultLoading] = useState(true)
   const [faultError, setFaultError] = useState('')
@@ -120,7 +138,8 @@ export function MissionHealthReport({
     }
 
     try {
-      setFaultLoading(true)
+      // No setFaultLoading(true) here: a live window refetches every
+      // 30 s and the table should not flash "Loading" each time
       setFaultError('')
 
       const params = new URLSearchParams()
@@ -143,6 +162,8 @@ export function MissionHealthReport({
         params.set('end', missionEnd)
       }
 
+      params.set('episodes', 'true')
+
       const response = await fetch(
         `${API_BASE}/fault-summary?${params.toString()}`,
       )
@@ -156,9 +177,13 @@ export function MissionHealthReport({
       const data = await response.json()
 
       if (!cancelled) {
+        if (data.error) {
+          throw new Error(data.error)
+        }
+
         setFaults(
-          Array.isArray(data.faults)
-            ? data.faults
+          Array.isArray(data.episodes)
+            ? data.episodes
             : [],
         )
       }
@@ -180,7 +205,14 @@ export function MissionHealthReport({
   return () => {
     cancelled = true
   }
-}, [readings[0]?.engineId, readings[0]?.time])
+  // The window's end only matters in 30 s steps, so a live window
+  // that grows every second refetches twice a minute, not every reading.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [
+  readings[0]?.engineId,
+  readings[0]?.time,
+  Math.floor((readings[readings.length - 1]?.time ?? 0) / 30_000),
+])
 
 const rulEngineId =
   readings[0]?.engineId || null
@@ -253,64 +285,87 @@ const formatRulFlights = (value) => {
   ).toLocaleString()} flights`
 }
 
-const latestFaultWithRul = faults.reduce(
-  (latest, fault) => {
-    if (
-      fault.latest_rul_seconds == null ||
-      !fault.last_seen
-    ) {
-      return latest
-    }
-
-    if (!latest) {
-      return fault
-    }
-
-    return new Date(fault.last_seen) >
-      new Date(latest.last_seen)
-      ? fault
-      : latest
-  },
-  null,
-)
-
-  /*
-   * Convert the replay reading into the same "latest" structure
-   * already used by the existing Engine Simulation health system.
+/*
+   * Health over the WHOLE window, not just the last reading.
+   * Every reading goes through the same healthFor() the Engine
+   * Simulation tab uses; a recorded fault episode caps the health
+   * of its parts while it is happening (plus FAULT_MEMORY_MS after,
+   * like a live alert). The worst point is the mission's health.
    */
-  const latestReading = readings[readings.length - 1] ?? null
+  const missionHealth = useMemo(() => {
+    const spans = faults
+      .map((episode) => ({
+        fault_type: episode.fault_type,
+        severity: episode.severity,
+        start: parseTime(episode.start),
+        end: parseTime(episode.end),
+      }))
+      .filter((span) => span.start != null && span.end != null)
 
-  const latest = latestReading
-    ? {
-        time: latestReading.time,
-        engineId: latestReading.engineId,
-        values: latestReading.values ?? {},
-        fault: latestReading.fault ?? {},
+    let worst = null
+    let last = null
+
+    for (const reading of readings) {
+      const at = new Date(reading.time).toISOString()
+
+      const alerts = spans
+        .filter(
+          (span) =>
+            span.start <= reading.time &&
+            reading.time <= span.end + FAULT_MEMORY_MS,
+        )
+        .map((span) => ({
+          fault_type: span.fault_type,
+          severity: span.severity,
+          timestamp: at,
+          acknowledged: false,
+        }))
+
+      const health = healthFor({
+        latest: {
+          time: reading.time,
+          engineId: reading.engineId,
+          values: reading.values ?? {},
+          fault: reading.fault ?? {},
+        },
+        stale: false,
+        alerts,
+      })
+
+      const overall = overallHealth(health)
+
+      if (overall == null) continue
+
+      const point = {
+        time: reading.time,
+        overall,
+        part: worstPart(health),
       }
-    : null
 
-  /*
-   * Reuse the existing health calculation.
-   *
-   * Replay does not currently pass live alerts into this report,
-   * so the health calculation here is based on the telemetry
-   * available in the selected mission recording.
-   */
-  const health = healthFor({
-    latest,
-    stale: readings.length === 0,
-    alerts: [],
-  })
+      if (!worst || overall < worst.overall) worst = point
+      last = point
+    }
 
-  const engine = overallHealth(health)
-  const worst = worstPart(health)
+    return { worst, last }
+  }, [readings, faults])
 
-  const worstPartLabel =
-    worst?.id && PART_BY_ID[worst.id]
-      ? PART_BY_ID[worst.id].label
-      : worst?.id ?? 'N/A'
+  const worstPoint = missionHealth.worst
+  const endPoint = missionHealth.last
 
-  const engineStatus = worst?.status ?? 'nodata'
+  const engine = worstPoint?.overall ?? null
+  const worst = worstPoint?.part ?? null
+
+  // Every part at ~100%: there is no weak component to name
+  const allHealthy = worst != null && worst.health >= 0.995
+
+  const worstPartLabel = !worst
+    ? 'N/A'
+    : allHealthy
+      ? 'None — all components healthy'
+      : PART_BY_ID[worst.id]?.label ?? worst.id
+
+  const engineStatus = statusOf(worst?.health)
+  const endStatus = statusOf(endPoint?.part?.health)
 
   const engineId =
     readings[0]?.engineId ??
@@ -329,81 +384,101 @@ const latestFaultWithRul = faults.reduce(
     typeof lastTime === 'number'
       ? new Date(lastTime).toLocaleString()
       : 'N/A'
-const severityRank = {
-  LOW: 1,
-  MEDIUM: 2,
-  HIGH: 3,
-  CRITICAL: 4,
-}
 
-const severityCounts = faults.reduce(
-  (counts, fault) => {
-    const severity = getFaultSeverity(fault)
+  const worstTime =
+    worstPoint && !allHealthy
+      ? new Date(worstPoint.time).toLocaleTimeString()
+      : null
 
-    if (severity === 'CRITICAL') {
-      counts.critical += 1
-    } else if (severity === 'HIGH') {
-      counts.high += 1
-    } else if (severity === 'MEDIUM') {
-      counts.medium += 1
-    } else if (severity === 'LOW') {
-      counts.low += 1
-    }
+  // ----------------------------------------------------------
+  // Fault episodes
+  // ----------------------------------------------------------
 
-    return counts
-  },
-  {
-    critical: 0,
-    high: 0,
-    medium: 0,
-    low: 0,
-  },
-)
+  const severityCounts = faults.reduce(
+    (counts, episode) => {
+      const key = String(episode.severity ?? '').toLowerCase()
 
-const primaryFault = [...faults].sort(
-  (a, b) => {
-    const severityDifference =
-      severityRank[getFaultSeverity(b)] -
-      severityRank[getFaultSeverity(a)]
+      if (key in counts) counts[key] += 1
 
-    if (severityDifference !== 0) {
-      return severityDifference
-    }
+      return counts
+    },
+    {
+      critical: 0,
+      high: 0,
+      medium: 0,
+      low: 0,
+    },
+  )
 
-    return Number(b.count ?? 0) - Number(a.count ?? 0)
-  },
-)[0] ?? null
+  // Worst severity first, then the longest
+  const primaryFault = [...faults].sort(
+    (a, b) =>
+      (SEVERITY_RANK[b.severity] ?? 0) -
+        (SEVERITY_RANK[a.severity] ?? 0) ||
+      (b.duration_seconds ?? 0) - (a.duration_seconds ?? 0),
+  )[0] ?? null
 
-const primaryFaultName = primaryFault
-  ? formatFaultName(primaryFault.fault_type)
-  : 'No significant fault detected'
+  const primaryFaultName = primaryFault
+    ? formatFaultName(primaryFault.fault_type)
+    : 'No significant fault detected'
 
-const maintenanceStatus =
-  severityCounts.critical > 0
-    ? 'Critical attention required'
-    : severityCounts.high > 0
-      ? 'Maintenance attention required'
-      : faults.length > 0
-        ? 'Monitor and schedule inspection'
-        : 'No maintenance issue detected'
+  // Short-term RUL = seconds until a fault is FULLY DEVELOPED.
+  // Only meaningful while that fault is still happening, and only
+  // for live data - never for an old replay window.
+  const lastEpisode = faults[faults.length - 1] ?? null
+  const lastEpisodeEnd = parseTime(lastEpisode?.end)
 
-const maintenanceAction =
-  severityCounts.critical > 0
-    ? 'Inspect the affected engine system before the next mission.'
-    : severityCounts.high > 0
-      ? 'Schedule inspection of the affected component and review the fault trend.'
-      : faults.length > 0
-        ? 'Continue monitoring the affected parameters and include them in the next inspection.'
-        : 'Continue normal monitoring and routine preventive maintenance.'
+  const activeFault =
+    lastEpisode &&
+    lastEpisodeEnd != null &&
+    typeof lastTime === 'number' &&
+    lastTime - lastEpisodeEnd <= ACTIVE_FAULT_MS &&
+    Date.now() - lastTime <= LIVE_DATA_MS
+      ? lastEpisode
+      : null
 
-const conclusionText =
-  engineStatus === 'critical'
-    ? `The mission telemetry indicates a critical engine condition. The primary recorded concern was ${primaryFaultName}. The observed health state and degradation indicators should be reviewed before the next mission.`
-    : engineStatus === 'warning'
-      ? `The mission completed with warning-level engine conditions. The primary recorded concern was ${primaryFaultName}. Continued monitoring and scheduled inspection are recommended.`
-      : faults.length > 0
-        ? `The mission completed with recorded fault activity, but the selected telemetry remains within a generally acceptable health state. Continued monitoring of ${primaryFaultName} is recommended.`
-        : 'The selected mission completed without recorded engine faults requiring additional attention.'
+  const liveRul = readings[readings.length - 1]?.fault?.rul?.seconds
+
+  const activeFaultRul =
+    typeof liveRul === 'number'
+      ? liveRul
+      : activeFault?.latest_rul_seconds ?? null
+
+  const maintenanceStatus =
+    severityCounts.critical > 0
+      ? 'Critical attention required'
+      : severityCounts.high > 0
+        ? 'Maintenance attention required'
+        : faults.length > 0
+          ? 'Monitor and schedule inspection'
+          : 'No maintenance issue detected'
+
+  const maintenanceAction =
+    severityCounts.critical > 0
+      ? 'Inspect the affected engine system before the next mission.'
+      : severityCounts.high > 0
+        ? 'Schedule inspection of the affected component and review the fault trend.'
+        : faults.length > 0
+          ? 'Continue monitoring the affected parameters and include them in the next inspection.'
+          : 'Continue normal monitoring and routine preventive maintenance.'
+
+  const episodeText = `${faults.length} fault ${
+    faults.length === 1 ? 'episode' : 'episodes'
+  }`
+
+  const recoveredText =
+    engineStatus !== 'normal' && endStatus === 'normal'
+      ? ' The engine had recovered by the end of the recording, but the fault should still be inspected.'
+      : ''
+
+  const conclusionText =
+    engineStatus === 'critical'
+      ? `The engine reached a critical condition during this mission (lowest health ${healthPercent(engine)} at ${worstTime}), mainly due to ${primaryFaultName}. Inspect the affected components before the next mission.${recoveredText}`
+      : engineStatus === 'warning'
+        ? `The engine showed warning-level conditions during this mission (lowest health ${healthPercent(engine)} at ${worstTime}). The primary concern was ${primaryFaultName}. Continued monitoring and scheduled inspection are recommended.${recoveredText}`
+        : faults.length > 0
+          ? `${episodeText} recorded (primary: ${primaryFaultName}), but engine health stayed within normal limits throughout. Continue monitoring the affected parameters.`
+          : 'The selected mission completed without recorded engine faults requiring additional attention.'
   return (
     <section
       className="mission-report"
@@ -422,8 +497,7 @@ const conclusionText =
           <h2>Mission Health Report</h2>
 
           <p className="mission-report__subtitle">
-            Historical engine telemetry analysis for the
-            selected replay window.
+            {description}
           </p>
         </div>
 
@@ -520,15 +594,19 @@ const conclusionText =
             <h3>Engine Health</h3>
 
             <p>
-              Overall engine condition calculated from the
-              selected mission telemetry.
+              Lowest engine condition reached during the
+              mission, from every reading and the recorded
+              faults.
             </p>
           </div>
         </div>
 
         <div className="mission-report__health">
           <div className="mission-report__health-main">
-            <span>Overall health</span>
+            <span>
+              Lowest health
+              {worstTime ? ` (at ${worstTime})` : ''}
+            </span>
 
             <strong>
               {healthPercent(engine)}
@@ -554,6 +632,15 @@ const conclusionText =
               {healthPercent(worst?.health)}
             </strong>
           </div>
+
+          <div className="mission-report__health-detail">
+            <span>At end of mission</span>
+
+            <strong>
+              {healthPercent(endPoint?.overall)}{' '}
+              {healthStatus(endStatus)}
+            </strong>
+          </div>
         </div>
       </section>
       {/* =====================================================
@@ -566,8 +653,9 @@ const conclusionText =
             <h3>Fault Analysis</h3>
 
             <p>
-              Recorded engine faults, severity, occurrences,
-              and latest remaining useful life estimates.
+              One row per fault episode. The detector often
+              flags a fault as Unknown Anomaly before a rule
+              can name it; that lead time is the early warning.
             </p>
           </div>
         </div>
@@ -592,18 +680,18 @@ const conclusionText =
                 <tr>
                   <th>Fault</th>
                   <th>Severity</th>
-                  <th>Occurrences</th>
-                  <th>Last Detected</th>
-                  <th>Latest RUL</th>
+                  <th>Started</th>
+                  <th>Duration</th>
+                  <th>Early warning</th>
                 </tr>
               </thead>
 
               <tbody>
                 {faults.map((fault) => {
-                  const severity = getFaultSeverity(fault)
+                  const severity = fault.severity ?? 'UNKNOWN'
 
                   return (
-                    <tr key={fault.fault_type}>
+                    <tr key={`${fault.engine_id}-${fault.start}`}>
                       <td>
                         {formatFaultName(fault.fault_type)}
                       </td>
@@ -617,15 +705,19 @@ const conclusionText =
                       </td>
 
                       <td>
-                        {Number(fault.count ?? 0).toLocaleString()}
+                        {formatFaultTime(fault.start)}
                       </td>
 
                       <td>
-                        {formatFaultTime(fault.last_seen)}
+                        {formatSeconds(fault.duration_seconds)}
                       </td>
 
                       <td>
-                        {formatRul(fault.latest_rul_seconds)}
+                        {fault.early_warning_seconds > 0
+                          ? `${formatSeconds(fault.early_warning_seconds)} before it was named`
+                          : fault.fault_type === 'UNKNOWN_ANOMALY'
+                            ? 'Never named by a rule'
+                            : '—'}
                       </td>
                     </tr>
                   )
@@ -754,25 +846,20 @@ const conclusionText =
 
           </div>
 
-          {latestFaultWithRul && (
+          {activeFault && activeFaultRul != null && (
             <div className="mission-rul-fault">
               <div>
                 <span className="mission-rul-label">
-                  LATEST FAULT RUL
+                  ACTIVE FAULT — TIME UNTIL FULLY DEVELOPED
                 </span>
 
                 <strong>
-                  {latestFaultWithRul.fault_type.replaceAll(
-                    '_',
-                    ' ',
-                  )}
+                  {formatFaultName(activeFault.fault_type)}
                 </strong>
               </div>
 
               <div className="mission-rul-fault-value">
-                {Number(
-                  latestFaultWithRul.latest_rul_seconds,
-                ).toFixed(1)}
+                {Number(activeFaultRul).toFixed(1)}
                 s
               </div>
             </div>
@@ -780,7 +867,11 @@ const conclusionText =
 
           <div className="mission-rul-summary">
             {rulData.rul?.summary ??
-              'No long-term RUL summary is available.'}
+              'No long-term RUL summary is available.'}{' '}
+            Estimated from the wear recorded over past flights;
+            live telemetry does not add wear.
+            {Number(rulData.flights_logged ?? 0) === 0 &&
+              ' No flights have been recorded for this engine yet, so this is the default estimate for its current wear level.'}
           </div>
         </>
       ) : (
@@ -827,15 +918,15 @@ const conclusionText =
                     </td>
 
                     <td>
-                      {formatNumber(stats.min)}
+                      {formatNumber(stats.min, SENSOR_DIGITS[key])}
                     </td>
 
                     <td>
-                      {formatNumber(stats.average)}
+                      {formatNumber(stats.average, SENSOR_DIGITS[key])}
                     </td>
 
                     <td>
-                      {formatNumber(stats.max)}
+                      {formatNumber(stats.max, SENSOR_DIGITS[key])}
                     </td>
 
                     <td>
@@ -883,7 +974,7 @@ const conclusionText =
           </div>
 
           <div className="mission-maintenance-card">
-            <span>TOTAL FAULT TYPES</span>
+            <span>FAULT EPISODES</span>
 
             <strong>
               {faults.length}
@@ -945,7 +1036,7 @@ const conclusionText =
 
           <div className="mission-conclusion__details">
             <div>
-              <span>Overall Health</span>
+              <span>Lowest Health</span>
 
               <strong>
                 {healthPercent(engine)}

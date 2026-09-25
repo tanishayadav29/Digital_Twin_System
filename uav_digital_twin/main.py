@@ -365,11 +365,91 @@ def get_fault_events():
 # wala fault = zyada zaroori).
 # ============================================================
 
+# ============================================================
+# FAULT EPISODES
+# ============================================================
+# Detector ek fault ke dauraan har second ek FaultEvent likhta
+# hai, aur shuru mein UNKNOWN_ANOMALY bolta hai jab tak koi rule
+# fault ka naam na bata de. Report ke liye un events ko episodes
+# mein jodte hain: same engine, beech mein 30 s se kam gap
+# (ML/train_rul_model.py ka STREAK_GAP_SECONDS bhi 30 s hai).
+# ============================================================
+
+EPISODE_GAP_SECONDS = 30
+
+SEVERITY_RANK = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, "CRITICAL": 4}
+
+
+def _fault_episodes(events):
+
+    # events: FaultEvent rows ordered by engine_id, detected_at
+    episodes = []
+
+    for event in events:
+
+        current = episodes[-1] if episodes else None
+
+        if (
+            current is None
+            or current["engine_id"] != event.engine_id
+            or (event.detected_at - current["_end"]).total_seconds() > EPISODE_GAP_SECONDS
+        ):
+            current = {
+                "engine_id": event.engine_id,
+                "_start": event.detected_at,
+                "_end": event.detected_at,
+                "_types": {},
+                "_first_named": None,
+                "severity": event.severity,
+                "events": 0,
+                "latest_rul_seconds": None,
+            }
+            episodes.append(current)
+
+        current["_end"] = event.detected_at
+        current["events"] += 1
+        current["_types"][event.fault_type] = current["_types"].get(event.fault_type, 0) + 1
+        current["latest_rul_seconds"] = event.estimated_rul_seconds
+
+        if SEVERITY_RANK.get(event.severity, 0) > SEVERITY_RANK.get(current["severity"], 0):
+            current["severity"] = event.severity
+
+        if event.fault_type != "UNKNOWN_ANOMALY" and current["_first_named"] is None:
+            current["_first_named"] = event.detected_at
+
+    result = []
+
+    for episode in episodes:
+
+        named = {k: v for k, v in episode["_types"].items() if k != "UNKNOWN_ANOMALY"}
+        start, end, first_named = episode["_start"], episode["_end"], episode["_first_named"]
+
+        result.append({
+            "engine_id": episode["engine_id"],
+            # Named fault if a rule ever named it, else UNKNOWN_ANOMALY
+            "fault_type": max(named, key=named.get) if named else "UNKNOWN_ANOMALY",
+            "fault_types": list(episode["_types"]),
+            "severity": episode["severity"],
+            "start": start,
+            "end": end,
+            "duration_seconds": (end - start).total_seconds(),
+            "events": episode["events"],
+            # Seconds the detector flagged it before any rule could name it
+            "early_warning_seconds": (
+                (first_named - start).total_seconds() if first_named else None
+            ),
+            "latest_rul_seconds": episode["latest_rul_seconds"],
+        })
+
+    return result
+
+
 @app.get("/fault-summary")
 def get_fault_summary(
     engine_id: Optional[str] = None,
     start: Optional[datetime] = None,
     end: Optional[datetime] = None,
+    episodes: bool = False,
 ):
 
     db = SessionLocal()
@@ -513,7 +593,7 @@ def get_fault_summary(
             reverse=True
         )
 
-        return {
+        response = {
             "total_faults": sum(
                 fault["count"]
                 for fault in faults
@@ -521,6 +601,29 @@ def get_fault_summary(
             "fault_types": len(faults),
             "faults": faults,
         }
+
+        # ----------------------------------------------------
+        # Optional: fault events grouped into episodes
+        # ----------------------------------------------------
+
+        if episodes:
+
+            events = db.query(FaultEvent)
+
+            if engine_id:
+                events = events.filter(FaultEvent.engine_id == engine_id)
+
+            if start:
+                events = events.filter(FaultEvent.detected_at >= start)
+
+            if end:
+                events = events.filter(FaultEvent.detected_at <= end)
+
+            response["episodes"] = _fault_episodes(
+                events.order_by(FaultEvent.engine_id, FaultEvent.detected_at).all()
+            )
+
+        return response
 
     except Exception as e:
 

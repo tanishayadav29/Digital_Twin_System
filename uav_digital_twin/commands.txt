@@ -1,8 +1,64 @@
-python3 -m uvicorn main:app --reload #terminal1
+UAV DIGITAL TWIN - HOW TO RUN (macOS)
+=====================================
 
-python3 sensor_simulator.py #terminal2
+ONE-TIME SETUP (run from the uav_digital_twin folder)
+-----------------------------------------------------
+
+cd uav_digital_twin
+
+# 1. Python 3.11 or newer.
+#    The ML models (ML/models/*.pkl) were saved with scikit-learn 1.9.0,
+#    which needs Python >= 3.11. The committed venv/ is Apple's Python 3.9
+#    and cannot install it, so make a new environment:
+brew install python@3.12
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# 2. Database.
+#    database.py reads DATABASE_URL from a .env file in this folder.
+#    - No .env        -> uses SQLite (uav_digital_twin.db), nothing to set up.
+#    - Postgres wanted -> create .env containing:
+#        DATABASE_URL=postgresql+psycopg2://postgres:<password>@localhost:5432/uav_digital_twin
+
+# 3. Only if your database was created before the RUL feature (Sep 24):
+#    adds the estimated_rul_seconds column + wear tables. Without it, fault
+#    events silently fail to save. Safe to run again.
+python migrate_rul.py
+
+# 4. Frontend packages
+cd frontend
+npm install
+cd ..
 
 
-cd uav_digital_twin #terminal3
-source venv/bin/activate
+RUN (3 terminals, every time)
+-----------------------------
+# Terminals 1 and 2 must be in uav_digital_twin/ with .venv active:
+# main.py loads ML/ and database.py by relative import, and system python3
+# does not have the packages.
+
+# Terminal 1 - backend
+cd uav_digital_twin
+source .venv/bin/activate
+python -m uvicorn main:app --reload
+
+# Terminal 2 - simulator (start after the backend is up)
+cd uav_digital_twin
+source .venv/bin/activate
+python sensor_simulator.py
+#   demo with chosen faults and all flight phases:
+#   python sensor_simulator.py --profile mission --fault OVERHEATING --fault LUBRICATION_ISSUE --fault INJECTOR_ABNORMALITY
+
+# Terminal 3 - dashboard
+# npm must run in frontend/ (where package.json is), not uav_digital_twin/.
+# No Python venv needed here.
+cd uav_digital_twin/frontend
 npm run dev
+
+
+WINDOWS (same steps, different syntax)
+--------------------------------------
+python -m venv .winenv
+.winenv\Scripts\activate
+pip install -r requirements.txt

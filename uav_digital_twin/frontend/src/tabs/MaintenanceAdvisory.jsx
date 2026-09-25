@@ -7,6 +7,7 @@ import { ALIASES, INTERVAL_ORDER, adviceFor } from '../config/maintenance.js'
 import { generateAdvisory } from '../lib/advisory.js'
 import { healthFor } from '../lib/health.js'
 import { formatClock } from '../lib/format.js'
+import { withZone } from '../lib/readings.js'
 import './MaintenanceAdvisory.css'
 
 const STORE_KEY = 'uav-dt:maintenance-actioned'
@@ -144,7 +145,7 @@ function buildAdvisories(
   recorded,
   actioned,
   health,
-  rulSeconds,
+  liveRul,
 ) {
   const byType = new Map()
 
@@ -166,6 +167,8 @@ function buildAdvisories(
         active: false,
         onlyTest: true,
         rulSeconds: null,
+        // Sensors the detector flagged in the most recent alert
+        sensors: [],
       })
     }
 
@@ -189,6 +192,10 @@ function buildAdvisories(
     )
 
     it.sessionCount += alert.count ?? 1
+
+    if (last >= it.lastSeen) {
+      it.sensors = alert.sensors ?? []
+    }
 
     it.lastSeen = Math.max(
       it.lastSeen,
@@ -263,12 +270,27 @@ function buildAdvisories(
       )
 
       // Find affected engine parts
-      const affectedParts =
+      let affectedParts =
         ENGINE_PARTS.filter((part) =>
           part.faults.some((name) =>
             it.names.has(name),
           ),
         )
+
+      // UNKNOWN_ANOMALY is not tied to any part:
+      // use the parts behind the sensors the
+      // detector flagged in its latest alert.
+      if (
+        affectedParts.length === 0 &&
+        it.type === 'UNKNOWN_ANOMALY'
+      ) {
+        affectedParts = ENGINE_PARTS.filter(
+          (part) =>
+            part.sensors.some((key) =>
+              it.sensors.includes(key),
+            ),
+        )
+      }
 
       const parts = affectedParts.map(
         (part) =>
@@ -306,12 +328,18 @@ function buildAdvisories(
           severity: it.severity,
           health: lowestHealth,
 
-          // Prefer RUL stored with the historical fault.
-          // Fall back to current live RUL if this is
-          // a new active fault.
-          rulSeconds:
-            it.rulSeconds ??
-            rulSeconds,
+          // RUL = seconds until the fault is fully
+          // developed, so it only means something
+          // while the fault is happening. Prefer the
+          // live estimate when the live fault is this
+          // one, else the latest recorded estimate.
+          rulSeconds: it.active
+            ? (liveRul &&
+              (ALIASES[liveRul.fault_type] ??
+                liveRul.fault_type) === it.type
+                ? liveRul.seconds
+                : it.rulSeconds)
+            : null,
 
           occurrences,
           affectedParts: parts,
@@ -618,7 +646,9 @@ function Advisory({
                 {advisory.predictive
                   .rulSeconds != null
                   ? `${advisory.predictive.rulSeconds.toFixed(1)} s`
-                  : 'N/A'}
+                  : advisory.active
+                    ? 'N/A'
+                    : 'Not active'}
               </strong>
             </div>
           </div>
@@ -722,10 +752,12 @@ export function MaintenanceAdvisory({
   // CURRENT LIVE RUL
   // ----------------------------------------------------------
 
-  const rulSeconds =
+  // { seconds, fault_type, ... } while the latest
+  // reading is an anomaly, otherwise null
+  const liveRul =
     typeof latest?.fault?.rul
       ?.seconds === 'number'
-      ? latest.fault.rul.seconds
+      ? latest.fault.rul
       : null
 
   // ----------------------------------------------------------
@@ -804,8 +836,10 @@ export function MaintenanceAdvisory({
         const normalized =
           rows
             .map((reading) => ({
+              // Backend timestamps are UTC without a zone;
+              // a bare Date.parse would read them as local time.
               time: Date.parse(
-                reading.timestamp,
+                withZone(reading.timestamp),
               ),
 
               engineId:
@@ -893,14 +927,14 @@ export function MaintenanceAdvisory({
         summary.faults,
         actioned,
         health,
-        rulSeconds,
+        liveRul,
       ),
     [
       alerts.items,
       summary.faults,
       actioned,
       health,
-      rulSeconds,
+      liveRul,
     ],
   )
 
@@ -1205,6 +1239,7 @@ export function MaintenanceAdvisory({
             reportReadings
           }
           summary={null}
+          description={`Latest ${reportReadings.length} readings from the database, loaded when this page was opened. For a specific flight, use the Replay tab.`}
         />
       </section>
 
